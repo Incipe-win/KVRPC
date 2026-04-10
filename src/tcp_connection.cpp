@@ -1,4 +1,5 @@
 #include "kvrpc/tcp_connection.h"
+
 #include <iostream>
 
 namespace kvrpc {
@@ -36,7 +37,7 @@ bool TcpConnection::SendAll(const char* data, size_t len) {
     size_t total_sent = 0;
     while (total_sent < len) {
         ssize_t sent = send(fd_, data + total_sent, len - total_sent, 0);
-        if (sent <= 0) { // Error or connection closed
+        if (sent <= 0) {  // Error or connection closed
             Close();
             return false;
         }
@@ -50,7 +51,7 @@ bool TcpConnection::RecvAll(char* buffer, size_t len) {
     size_t total_recv = 0;
     while (total_recv < len) {
         ssize_t r = recv(fd_, buffer + total_recv, len - total_recv, 0);
-        if (r <= 0) { // Error or connection closed
+        if (r <= 0) {  // Error or connection closed
             Close();
             return false;
         }
@@ -66,4 +67,4 @@ void TcpConnection::Close() {
     }
 }
 
-} // namespace kvrpc
+}  // namespace kvrpc

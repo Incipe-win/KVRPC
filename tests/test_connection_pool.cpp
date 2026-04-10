@@ -1,8 +1,9 @@
-#include "kvrpc/connection_pool.h"
+#include <cassert>
 #include <iostream>
 #include <thread>
 #include <vector>
-#include <cassert>
+
+#include "kvrpc/connection_pool.h"
 
 using namespace kvrpc;
 
@@ -10,8 +11,8 @@ void test_pool_concurrency() {
     // We create a mocked pool with 2 "slots"
     // Since we are not actually running a server on port 9999,
     // the Connect() inside pool will fail and IsConnected() == false.
-    // That's fine, we are just testing the pool's thread synchronization mechanisms
-    // and custom deleter here.
+    // That's fine, we are just testing the pool's thread synchronization
+    // mechanisms and custom deleter here.
     ConnectionPool pool("127.0.0.1", 9999, 2);
 
     auto worker = [&pool](int id) {
@@ -27,7 +28,8 @@ void test_pool_concurrency() {
     };
 
     // We have 2 pool slots, but spawn 4 threads!
-    // Threads 3 and 4 should block and successfully wait for 1 and 2 to free their connections.
+    // Threads 3 and 4 should block and successfully wait for 1 and 2 to free
+    // their connections.
     std::vector<std::thread> threads;
     for (int i = 1; i <= 4; ++i) {
         threads.emplace_back(worker, i);

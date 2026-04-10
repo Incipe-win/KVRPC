@@ -1,21 +1,22 @@
 #pragma once
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <string>
 #include <vector>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
 
 namespace kvrpc {
 
 class TcpConnection {
-private:
+   private:
     int fd_;
     std::string ip_;
     uint16_t port_;
 
-public:
+   public:
     TcpConnection() : fd_(-1), port_(0) {}
     ~TcpConnection() { Close(); }
 
@@ -27,4 +28,4 @@ public:
     bool IsConnected() const { return fd_ != -1; }
 };
 
-} // namespace kvrpc
+}  // namespace kvrpc

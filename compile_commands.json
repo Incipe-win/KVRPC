@@ -1,0 +1,96 @@
+[
+  {
+    "directory": "/home/huachaowu/code/cpp/project/KVRPC",
+    "arguments": [
+      "/usr/bin/g++",
+      "-c",
+      "-m64",
+      "-fvisibility=hidden",
+      "-fvisibility-inlines-hidden",
+      "-O3",
+      "-std=c++17",
+      "-Iinclude",
+      "-I../KVCache/include",
+      "-DNDEBUG",
+      "-o",
+      "build/.objs/test_connection_pool/linux/x86_64/release/tests/test_connection_pool.cpp.o",
+      "tests/test_connection_pool.cpp"
+    ],
+    "file": "tests/test_connection_pool.cpp"
+  },
+  {
+    "directory": "/home/huachaowu/code/cpp/project/KVRPC",
+    "arguments": [
+      "/usr/bin/g++",
+      "-c",
+      "-m64",
+      "-fvisibility=hidden",
+      "-fvisibility-inlines-hidden",
+      "-O3",
+      "-std=c++17",
+      "-Iinclude",
+      "-I../KVCache/include",
+      "-DNDEBUG",
+      "-o",
+      "build/.objs/test_serializer/linux/x86_64/release/tests/test_serializer.cpp.o",
+      "tests/test_serializer.cpp"
+    ],
+    "file": "tests/test_serializer.cpp"
+  },
+  {
+    "directory": "/home/huachaowu/code/cpp/project/KVRPC",
+    "arguments": [
+      "/usr/bin/g++",
+      "-c",
+      "-m64",
+      "-fvisibility=hidden",
+      "-fvisibility-inlines-hidden",
+      "-O3",
+      "-std=c++17",
+      "-Iinclude",
+      "-I../KVCache/include",
+      "-DNDEBUG",
+      "-o",
+      "build/.objs/test_kvcache_client/linux/x86_64/release/tests/test_kvcache_client.cpp.o",
+      "tests/test_kvcache_client.cpp"
+    ],
+    "file": "tests/test_kvcache_client.cpp"
+  },
+  {
+    "directory": "/home/huachaowu/code/cpp/project/KVRPC",
+    "arguments": [
+      "/usr/bin/g++",
+      "-c",
+      "-m64",
+      "-fvisibility=hidden",
+      "-fvisibility-inlines-hidden",
+      "-O3",
+      "-std=c++17",
+      "-Iinclude",
+      "-DNDEBUG",
+      "-o",
+      "build/.objs/kvrpc/linux/x86_64/release/src/tcp_connection.cpp.o",
+      "src/tcp_connection.cpp"
+    ],
+    "file": "src/tcp_connection.cpp"
+  },
+  {
+    "directory": "/home/huachaowu/code/cpp/project/KVRPC",
+    "arguments": [
+      "/usr/bin/g++",
+      "-c",
+      "-m64",
+      "-fvisibility=hidden",
+      "-fvisibility-inlines-hidden",
+      "-O3",
+      "-std=c++17",
+      "-Iinclude",
+      "-I../KVCache/include",
+      "-DNDEBUG",
+      "-o",
+      "build/.objs/test_rpc_client/linux/x86_64/release/tests/test_rpc_client.cpp.o",
+      "tests/test_rpc_client.cpp"
+    ],
+    "file": "tests/test_rpc_client.cpp"
+  }
+]
