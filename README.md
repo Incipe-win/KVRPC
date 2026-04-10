@@ -2,14 +2,14 @@
 
 **KVRPC** 是一个基于 C++11/C++17 编写的轻量级、高性能异步 RPC 网络通信框架。它是作为 [KVCache](../KVCache) (基于内存的分布式键值存储数据库) 的网络通信引擎而设计的。
 
-本项目去除了对 gRPC、Protobuf 等重量级第三方库的依赖，完全从零手写序列化与网络传输层，非常适合学习和展示 C++ 现代语法以及网络通信底层的原理，是一个非常具有“内涵”的 C++ 基础架构组件。
+本项目去除了对 gRPC、Protobuf 等重量级第三方库的依赖，使用现代 C++ 原生实现序列化与网络传输层。作为一个高内聚的 C++ 基础架构组件，它在保障极致运行性能的同时，提供了极低的业务接入门槛。
 
-## 核心特性（简历亮点）
+## 核心特性
 
 * **基于编译期多态的序列化引擎**：完全基于 C++11 的可变参数模板 (Variadic Templates) 与 SFINAE 特性，实现基础类型、字符串类型的零依赖二进制封包与解包。
 * **线程安全的 TCP 连接池**：利用 `std::mutex` 与 `std::condition_variable` 实现了通信连接的高效复用。结合 `std::shared_ptr` 的自定义删除器 (Custom Deleter)，实现了连接被客户端用完后的自动回收（Auto-Release）。
 * **异步非阻塞的 API 抽象模型**：客户端接口底层通过 `std::future` 和 `std::async` 实现网络 I/O 等待与主线程业务逻辑的解耦，使调用网络 RPC 接口像本地异步接口一样自然。
-* **完美的 KVCache 业务落地**：通过内部代理层 (Stub)，将面向用户的 `Get/Set` 调用自动组装为包含 `<magic, command, key_len, value_len>` `Header` 和对应 `Payload` 的二进制网络协议报文，直连后端的 KVCache 存储节点。
+* **无缝集成 KVCache 存储引擎**：通过内部代理层 (Stub)，将面向用户的 `Get/Set` 调用自动组装为包含 `<magic, command, key_len, value_len>` `Header` 和对应 `Payload` 的二进制网络协议报文，实现与后端 KVCache 分布式节点的高效连通。
 
 ## 架构设计流
 
