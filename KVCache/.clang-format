@@ -1,0 +1,16 @@
+---
+Language: Cpp
+BasedOnStyle: Google
+
+IndentWidth: 4
+UseTab: Never
+ColumnLimit: 120
+
+BreakBeforeBraces: Attach
+
+BreakConstructorInitializers: BeforeComma
+
+AllowShortFunctionsOnASingleLine: None
+
+AccessModifierOffset: -4
+NamespaceIndentation: None

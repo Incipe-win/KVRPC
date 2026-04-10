@@ -1,0 +1,5 @@
+.git
+.xmake
+build
+.vscode
+*.md
