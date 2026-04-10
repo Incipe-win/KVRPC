@@ -1,0 +1,6 @@
+/build/
+/.xmake/
+*.o
+*.a
+*.so
+*.out
