@@ -1,6 +1,3 @@
 [submodule "KVCache"]
 	path = KVCache
 	url = git@github.com:Incipe-win/KVCache.git
-[submodule "KVRPC"]
-	path = KVRPC
-	url = git@github.com:Incipe-win/KVRPC.git
