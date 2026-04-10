@@ -2,7 +2,6 @@
 
 #include "kvrpc/tcp_connection.h"
 #include <condition_variable>
-#include <iostream>
 #include <memory>
 #include <mutex>
 #include <queue>

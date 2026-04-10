@@ -1,7 +1,5 @@
 #include "kvrpc/tcp_connection.h"
 
-#include <iostream>
-
 namespace kvrpc {
 
 bool TcpConnection::Connect(const std::string& ip, uint16_t port) {
