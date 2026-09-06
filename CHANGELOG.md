@@ -18,6 +18,7 @@
 
 ### Build and verification
 
+- Make failed-connection recovery tests portable across TCP stacks, verify successful reuse afterward, and report expected/actual error codes on assertion failures.
 - Add CMake builds, CTest registration, installation, and an exported `KVRPC::kvrpc` package target.
 - Correct Xmake include paths and expose the shared protocol without a sibling checkout.
 - Replace demonstration programs with automatically checked tests and real process integration.

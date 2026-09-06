@@ -29,14 +29,28 @@ int main() {
     }));
     for (auto& worker : workers) worker.get();
     shared.Close(); concurrent.Finish();
-    // A bound, non-listening socket reserves a port that deterministically refuses connections.
+    // Reserve the port throughout the test. Linux refuses connections to a bound,
+    // non-listening socket; Darwin can drop the SYN and let the connection time out.
     int reserved = socket(AF_INET, SOCK_STREAM, 0); CHECK(reserved >= 0);
     sockaddr_in address{}; address.sin_family = AF_INET; address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     CHECK(bind(reserved, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
     socklen_t address_size = sizeof(address);
     CHECK(getsockname(reserved, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
-    kvrpc::ConnectionPool refused("127.0.0.1", ntohs(address.sin_port), 1, {100ms, 100ms}, 100ms);
+    kvrpc::ConnectionPool recovering("127.0.0.1", ntohs(address.sin_port), 1, {500ms, 500ms}, 100ms);
     for (int i = 0; i < 3; ++i)
-        ErrorIs(kvrpc::ErrorCode::connection, [&] { refused.Acquire(); });
+        ErrorIsOneOf({kvrpc::ErrorCode::connection, kvrpc::ErrorCode::timeout}, [&] { recovering.Acquire(); });
+
+    // A successful exchange after the failures proves the single pool slot was
+    // returned. Merely accepting timeout errors would also hide a leaked slot.
+    CHECK(listen(reserved, 1) == 0);
+    auto recovered = recovering.Acquire();
+    CHECK(recovered->IsConnected());
+    CHECK(recovered->SendAll("x", 1));
+    pollfd ready{reserved, POLLIN, 0}; CHECK(poll(&ready, 1, 5000) > 0);
+    int accepted = accept(reserved, nullptr, nullptr); CHECK(accepted >= 0);
+    char byte = 0; Read(accepted, &byte, 1); CHECK(byte == 'x');
+    close(accepted);
+    recovered.reset();
+    recovering.Close();
     close(reserved);
 }

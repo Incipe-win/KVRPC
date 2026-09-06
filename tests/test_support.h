@@ -7,6 +7,7 @@
 #include <chrono>
 #include <functional>
 #include <future>
+#include <initializer_list>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -19,10 +20,32 @@ template<class E = std::exception, class F> void Throws(F&& f) {
     try { f(); } catch (const E&) { caught = true; }
     CHECK(caught);
 }
+inline const char* ErrorName(kvrpc::ErrorCode code) {
+    switch (code) {
+        case kvrpc::ErrorCode::invalid_argument: return "invalid_argument";
+        case kvrpc::ErrorCode::overloaded: return "overloaded";
+        case kvrpc::ErrorCode::closed: return "closed";
+        case kvrpc::ErrorCode::timeout: return "timeout";
+        case kvrpc::ErrorCode::connection: return "connection";
+        case kvrpc::ErrorCode::transport: return "transport";
+        case kvrpc::ErrorCode::protocol: return "protocol";
+    }
+    return "unknown";
+}
+template<class F> void ErrorIsOneOf(std::initializer_list<kvrpc::ErrorCode> codes, F&& f) {
+    std::string expected;
+    for (auto code : codes) {
+        if (!expected.empty()) expected += " or ";
+        expected += ErrorName(code);
+    }
+    try { f(); } catch (const kvrpc::Error& e) {
+        for (auto code : codes) if (e.code() == code) return;
+        throw std::runtime_error("Expected error " + expected + ", received " + ErrorName(e.code()) + ": " + e.what());
+    }
+    throw std::runtime_error("Expected error " + expected + ", but no exception was thrown");
+}
 template<class F> void ErrorIs(kvrpc::ErrorCode code, F&& f) {
-    bool caught = false;
-    try { f(); } catch (const kvrpc::Error& e) { CHECK(e.code() == code); caught = true; }
-    CHECK(caught);
+    ErrorIsOneOf({code}, std::forward<F>(f));
 }
 inline void Read(int fd, char* data, size_t size) {
     while (size) {
