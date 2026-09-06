@@ -10,7 +10,7 @@ target("kvcache_lib")
     set_kind("static")
 
     add_includedirs("include", "../include")
-    add_files("src/tcp_server.cpp", "src/aof.cpp")
+    add_files("../src/tcp_server.cpp", "src/aof.cpp")
 
 
 target("kv_server")

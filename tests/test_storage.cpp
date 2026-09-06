@@ -57,4 +57,59 @@ int main() {
     Call(service, Command::SET, "k", "v");
     Throws([&] { Call(service, Command::SET, "k", "w"); });
     Throws([&] { Call(service, Command::GET, "k"); }); // Storage failure fails closed.
+    // Mixed operations share one durability barrier and preserve their serial order.
+    TempFile grouped;
+    {
+        kvcache::CacheService batch(10, 1, grouped.path);
+        std::vector<std::vector<uint8_t>> requests{
+            kvcache::Message::encode(Command::SET, "k", "first"),
+            kvcache::Message::encode(Command::GET, "k"),
+            kvcache::Message::encode(Command::SET, "k", "second"),
+            kvcache::Message::encode(Command::DEL, "k"),
+            kvcache::Message::encode(Command::GET, "k"),
+            kvcache::Message::encode(Command::SET, "keep", "durable")};
+        std::vector<kvcache::TcpServer::Input> inputs;
+        for (const auto& request : requests) inputs.emplace_back(std::cref(request));
+        auto replies = batch.HandleBatch(inputs);
+        auto value = [](const auto& bytes) {
+            auto h = kvcache::Message::decodeHeader(bytes.data());
+            return std::string(reinterpret_cast<const char*>(bytes.data() + kvcache::HEADER_SIZE + h.key_len), h.value_len);
+        };
+        CHECK(value(replies[1].bytes) == "first");
+        CHECK(value(replies[4].bytes).empty());
+        auto stats = Call(batch, Command::STATS, "");
+        CHECK(stats.find("AOF records: 4, AOF syncs: 1") != std::string::npos);
+        auto malformed = kvcache::Message::encode(Command::GET, "k"); malformed[0] = 0;
+        auto valid = kvcache::Message::encode(Command::GET, "keep");
+        auto isolated = batch.HandleBatch({std::cref(malformed), std::cref(valid)});
+        CHECK(isolated[0].close && value(isolated[1].bytes) == "durable");
+    }
+    {
+        kvcache::CacheService restored(10, 1, grouped.path);
+        CHECK(Call(restored, Command::GET, "k").empty());
+        CHECK(Call(restored, Command::GET, "keep") == "durable");
+    }
+    // An over-capacity batch writes no prefix and never acknowledges any operation.
+    TempFile capped;
+    {
+        kvcache::CacheService batch(10, 1, capped.path, kvcache::HEADER_SIZE + 2);
+        auto a = kvcache::Message::encode(Command::SET, "a", "1");
+        auto b = kvcache::Message::encode(Command::SET, "b", "2");
+        Throws([&] { batch.HandleBatch({std::cref(a), std::cref(b)}); });
+    }
+    CHECK(std::ifstream(capped.path, std::ios::binary | std::ios::ate).tellg() == 0);
+    // Recovery restores mutation history, not the unlogged read-driven LRU order.
+    TempFile eviction;
+    {
+        kvcache::CacheService cache(2, 1, eviction.path);
+        Call(cache, Command::SET, "a", "1"); Call(cache, Command::SET, "b", "2");
+        Call(cache, Command::GET, "a"); Call(cache, Command::SET, "c", "3");
+        CHECK(Call(cache, Command::GET, "b").empty());
+    }
+    {
+        kvcache::CacheService restored(2, 1, eviction.path);
+        CHECK(Call(restored, Command::GET, "a").empty());
+        CHECK(Call(restored, Command::GET, "b") == "2");
+    }
+
 }

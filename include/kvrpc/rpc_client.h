@@ -34,10 +34,21 @@ public:
                 check(conn->RecvAll(header.data(), header.size()));
                 Serializer decoded(std::move(header));
                 uint32_t size = 0; decoded.Deserialize(size);
+                const bool remote_error = (size & 0x80000000u) != 0;
+                size &= 0x7fffffffu;
                 if (size > limit) throw Error(ErrorCode::protocol, "RPC response exceeds frame limit");
                 std::vector<char> response(size);
                 check(conn->RecvAll(response.data(), response.size()));
                 Serializer result(std::move(response));
+                if (remote_error) {
+                    uint32_t status = 0;
+                    std::string message;
+                    try { result.Deserialize(status, message); }
+                    catch (const std::exception&) { throw Error(ErrorCode::protocol, "Invalid remote error envelope"); }
+                    if (status < 1 || status > 3 || result.Remaining())
+                        throw Error(ErrorCode::protocol, "Invalid remote error status");
+                    throw RemoteError(status, message);
+                }
                 if constexpr (std::is_void_v<RetType>) {
                     if (result.Remaining()) throw Error(ErrorCode::protocol, "Unexpected void response payload");
                     return;
@@ -48,7 +59,8 @@ public:
                     if (result.Remaining()) throw Error(ErrorCode::protocol, "Trailing RPC response bytes");
                     return value;
                 }
-            } catch (...) { conn->Close(); throw; }
+            } catch (const RemoteError&) { throw; }
+            catch (...) { conn->Close(); throw; }
         });
     }
 private:

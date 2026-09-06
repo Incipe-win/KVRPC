@@ -40,22 +40,46 @@ AofLogger::~AofLogger() { if (fd_ >= 0) close(fd_); }
 void AofLogger::start() { std::lock_guard<std::mutex> lock(mutex_); started_ = true; }
 void AofLogger::stop() { std::lock_guard<std::mutex> lock(mutex_); started_ = false; }
 void AofLogger::log(Command cmd, const std::string& key, const std::string& value) {
-    if (cmd != Command::SET && cmd != Command::DEL) throw std::invalid_argument("Invalid AOF command");
-    auto data = Message::encode(cmd, key, value);
+    logBatch({{cmd, key, value}});
+}
+AofLogger::Stats AofLogger::stats() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return stats_;
+}
+void AofLogger::logBatch(const std::vector<Mutation>& mutations) {
+    if (mutations.empty()) return;
     std::lock_guard<std::mutex> lock(mutex_);
     if (!started_ || failed_) throw std::runtime_error("AOF is stopped or failed");
-    if (data.size() > max_bytes_ - bytes_) throw std::runtime_error("AOF size limit reached");
-    size_t offset = 0;
-    while (offset < data.size()) {
-        auto n = write(fd_, data.data() + offset, data.size() - offset);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) { failed_ = true; throw std::runtime_error("AOF write failed"); }
-        offset += static_cast<size_t>(n);
+    // Preflight the whole batch: capacity rejection must not write a prefix.
+    size_t total = 0;
+    for (const auto& mutation : mutations) {
+        if (mutation.command != Command::SET && mutation.command != Command::DEL)
+            throw std::invalid_argument("Invalid AOF command");
+        if (mutation.command == Command::DEL && !mutation.value.empty())
+            throw std::invalid_argument("DEL cannot carry a value");
+        auto encoded = Message::encode(mutation.command, mutation.key, mutation.value);
+        if (encoded.size() > max_bytes_ - bytes_ - total) throw std::runtime_error("AOF size limit reached");
+        total += encoded.size();
     }
-    int result;
-    do { result = fsync(fd_); } while (result < 0 && errno == EINTR);
-    if (result < 0) { failed_ = true; throw std::runtime_error("AOF sync failed"); }
-    bytes_ += data.size();
+    try {
+        for (const auto& mutation : mutations) {
+            auto data = Message::encode(mutation.command, mutation.key, mutation.value);
+            size_t offset = 0;
+            while (offset < data.size()) {
+                auto n = write(fd_, data.data() + offset, data.size() - offset);
+                if (n < 0 && errno == EINTR) continue;
+                if (n <= 0) throw std::runtime_error("AOF write failed");
+                offset += static_cast<size_t>(n);
+            }
+        }
+        int result;
+        do { result = fsync(fd_); } while (result < 0 && errno == EINTR);
+        if (result < 0) throw std::runtime_error("AOF sync failed");
+    } catch (...) { failed_ = true; throw; }
+    bytes_ += total;
+    stats_.records += mutations.size();
+    ++stats_.syncs;
+    stats_.bytes += total;
 }
 void AofLogger::replay(ReplayCallback callback) {
     std::lock_guard<std::mutex> lock(mutex_);

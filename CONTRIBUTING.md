@@ -37,12 +37,13 @@ Sanitizer runtime support depends on the compiler and host kernel. Report startu
 | --- | --- |
 | `serializer` | Byte layout, binary strings, bounds, invalid encodings |
 | `connection_pool` | Exclusive leasing, contention, timeout, shutdown, surviving leases |
+| `rpc_server` | Typed dispatch over real TCP, remote errors, concurrent clients, fragmentation, pipelines |
 | `rpc_client` | Framing, connection reuse, response validation, future lifetime |
 | `kvcache_client` | Acknowledgements, echoed keys, commands, reconnect after invalid responses |
 | `transport` | Partial transfers, deadlines, EOF, reset handling |
 | `executor` | Bounded admission, queue rejection, drain, exception propagation |
 | `storage` | LRU behavior, deletion, log locking, replay, corruption, fail-closed limits |
-| `server_integration` | Built server and C++ example, large frames, pipelining, concurrency, crash recovery, signals |
+| `server_integration` / `server_always` | Both sync modes, profile application, large frames, pipelines, concurrent acknowledged-write recovery, signals |
 
 Assertions remain active in Release builds. Network fixtures bind loopback ports before launching client work and propagate server-side failures back to the test. Tests do not depend on a manually started server.
 

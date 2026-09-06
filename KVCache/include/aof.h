@@ -5,7 +5,7 @@
 #include <string>
 
 namespace kvcache {
-// Synchronous append + fsync. A failed append poisons further writes until restart.
+// Synchronous append + fsync, shared across a batch. A failed append poisons further writes until restart.
 class AofLogger {
 public:
     explicit AofLogger(const std::string& filename, size_t max_bytes = 1024ULL * 1024 * 1024);
@@ -13,6 +13,10 @@ public:
     AofLogger(const AofLogger&) = delete;
     AofLogger& operator=(const AofLogger&) = delete;
     void log(Command cmd, const std::string& key, const std::string& value);
+    struct Mutation { Command command; std::string key, value; };
+    struct Stats { uint64_t records = 0, syncs = 0, bytes = 0; };
+    void logBatch(const std::vector<Mutation>& mutations);
+    Stats stats() const;
     void start();
     void stop();
     using ReplayCallback = std::function<void(Command, const std::string&, const std::string&)>;
@@ -23,6 +27,7 @@ private:
     size_t max_bytes_;
     bool failed_ = false;
     bool started_ = false;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
+    Stats stats_;
 };
 }  // namespace kvcache

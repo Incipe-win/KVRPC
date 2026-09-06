@@ -1,6 +1,6 @@
 # KVRPC
 
-KVRPC is a C++17 TCP client library with asynchronous RPC calls, reusable connections, bounded work queues, and explicit failure handling. The repository also contains a Linux KVCache server for end-to-end development and deployment in a controlled network.
+KVRPC is a C++17 TCP RPC library with asynchronous RPC calls, reusable connections, bounded work queues, and explicit failure handling. It includes a typed generic RPC server and a Linux KVCache server for end-to-end development and deployment in a controlled network.
 
 The client library has no third-party runtime dependencies. It supports a generic length-prefixed RPC format and the KVCache binary protocol. These are separate protocols: the KVCache server accepts KVCache commands only.
 
@@ -11,7 +11,9 @@ The client library has no third-party runtime dependencies. It supports a generi
 - Connection leases remain valid after their pool wrapper is destroyed; failed connections are discarded before reuse.
 - Response headers, lengths, commands, keys, and decoded payloads are validated before results are returned.
 - KVCache supports `SET`, `GET`, `DEL`, and `STATS`, with binary-safe keys and values.
-- The server acknowledges mutations after appending and synchronizing its log, and rejects corrupt logs at startup.
+- Typed RPC method registration supports scalar/string arguments, void results, and structured remote errors.
+- KVCache groups ready mutations behind one fsync before acknowledgement, with an `always` mode for comparison.
+- The server rejects corrupt logs at startup and exposes mutation/fsync counters.
 - Automated tests cover protocol compatibility, concurrency, overload, failure handling, persistence, and process lifecycle.
 
 ## Build and test
@@ -90,7 +92,7 @@ int main() {
 
 Wait for a successful `Set` before issuing a dependent `Get`. Concurrent calls can execute on different connections and have no submission-order guarantee. `Set` and `Delete` return `true` after a valid acknowledgement; failures throw. Version 1 returns an empty string for both a missing key and a stored empty value.
 
-`RpcClient::Call<T>(method, args...)` uses the generic protocol described in [Protocol reference](docs/PROTOCOL.md). Applications must supply a compatible generic RPC server. Use fixed-width integer types in RPC signatures.
+`RpcClient::Call<T>(method, args...)` uses the generic protocol described in [Protocol reference](docs/PROTOCOL.md). Register matching methods with `RpcServer`; see the runnable example below. Use fixed-width integer types in RPC signatures.
 
 ### Resource limits and lifetime
 
@@ -127,9 +129,54 @@ target_link_libraries(my_app PRIVATE KVRPC::kvrpc)
 
 Pass `-DCMAKE_PREFIX_PATH="$HOME/.local"` when configuring the consuming project. Public headers include the KVCache protocol; consumers do not need a sibling KVCache checkout.
 
+## Generic RPC round trip
+
+```sh
+./build/release/kvrpc_rpc_server 8081
+# In another terminal:
+./build/release/kvrpc_rpc_client 8081
+```
+
+Embedding a method dispatcher:
+
+```cpp
+#include <kvrpc/rpc_server.h>
+kvrpc::RpcServer server(8081);
+server.Register<int64_t, int32_t, int32_t>("add",
+    [](int32_t a, int32_t b) { return int64_t(a) + b; });
+server.Start(); // Blocks; call Stop() from another thread and join before destruction.
+```
+
+Register methods before starting. Methods execute serially on the event loop. Unknown methods,
+invalid arguments, and handler failures return `RemoteError` with status 1, 2, or 3.
+Port 0 is available to embedding applications for an OS-assigned port (`Port()` after readiness).
+
+## Read-through application example
+
+With `kv_server` running on port 8080:
+
+```sh
+./build/release/profile_demo 8080 examples/profiles.tsv demo-v1
+```
+
+This starts a generic profile RPC service, looks up synthetic user 42 through the real TCP client,
+loads the source file on a cache miss, verifies a cache hit, invalidates the entry, and verifies a
+second source read. The source revision namespaces immutable snapshots. It demonstrates application
+integration; it is not a claim of external users or production deployment. See [Use case](docs/USE_CASE.md).
+
+## Reproduce the persistence comparison
+
+```sh
+python3 benchmarks/run.py --seconds 2 --repeats 3 --output benchmarks/results.json
+```
+
+The harness starts fresh servers in `always` and `group` modes, runs identical C++ client workloads,
+checks returned values and acknowledgements, and records throughput, p50/p95/p99, errors, and fsyncs.
+See [Performance report](docs/PERFORMANCE.md) for local measurements and [raw trials](benchmarks/results.json).
+
 ## Deployment scope
 
-The server is a single-node, entry-bounded LRU cache with synchronous append-only persistence. It has no replication, clustering, authentication, TLS, TTL, HTTP endpoint, automatic log compaction, or generic RPC dispatch. Deploy it on loopback or an access-controlled private network; use an authenticated transport boundary where remote access is required.
+The server is a single-node, entry-bounded LRU cache with synchronous append-only persistence. It has no replication, clustering, authentication, TLS, TTL, HTTP endpoint, automatic log compaction. Generic RPC uses a separate `RpcServer` listener. Deploy it on loopback or an access-controlled private network; use an authenticated transport boundary where remote access is required.
 
 The repository supplies tested correctness and resource controls, not a workload-independent production certification. Capacity, latency, recovery procedures, filesystem behavior, and network controls must be validated for the deployment. See [Operations](docs/OPERATIONS.md) for concrete limits and recovery procedures.
 
@@ -140,5 +187,6 @@ The repository supplies tested correctness and resource controls, not a workload
 - [Operations](docs/OPERATIONS.md): deployment, persistence, monitoring, and recovery.
 - [Contributing](CONTRIBUTING.md): development and verification commands.
 - [Validation record](docs/VALIDATION.md): local test results and unverified scope.
+- [Resume wording](docs/RESUME.md): candidate bullets and interview evidence.
 - [Changes](CHANGELOG.md): behavior changes from the original prototype.
 - [KVCache](KVCache/README.md): bundled server and cache components.

@@ -9,7 +9,8 @@ import sys
 import tempfile
 import time
 
-SERVER, CLIENT = sys.argv[1:]
+SERVER, CLIENT = sys.argv[1:3]
+MODE = sys.argv[3] if len(sys.argv) > 3 else "group"
 HEADER = struct.Struct("!HBBII")
 
 
@@ -57,7 +58,7 @@ with tempfile.TemporaryDirectory(prefix="kvrpc-integration-") as directory:
         return socket.create_connection(("127.0.0.1", port), timeout=3)
 
     def start():
-        process = subprocess.Popen([SERVER, str(port), str(path / "data.aof")], stdout=log, stderr=log)
+        process = subprocess.Popen([SERVER, str(port), str(path / "data.aof"), "127.0.0.1", MODE], stdout=log, stderr=log)
         processes.append(process)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -74,6 +75,8 @@ with tempfile.TemporaryDirectory(prefix="kvrpc-integration-") as directory:
     try:
         process = start()
         subprocess.run([CLIENT, str(port)], check=True, timeout=10)
+        if len(sys.argv) > 5:
+            subprocess.run([sys.argv[4], str(port), sys.argv[5], "test-v1"], check=True, timeout=10)
         with connect() as sock:
             data = b"v\x00" + b"x" * 1048574
             # Exercise fragmented input, maximum values, and partial output handling.
@@ -114,11 +117,15 @@ with tempfile.TemporaryDirectory(prefix="kvrpc-integration-") as directory:
         with connect() as sock:
             check(call(sock, 2, b"durable") == b"acknowledged", "Acknowledged write lost on restart")
             check(call(sock, 2, b"pipe") == b"", "Deleted key resurrected")
+            for index in range(8):
+                for j in range(8):
+                    key = f"worker:{index}:{j}".encode()
+                    check(call(sock, 2, key) == key, "Acknowledged concurrent write lost on restart")
         process.terminate()
         check(process.wait(timeout=5) == 0, "SIGTERM did not shut down cleanly")
         with open(path / "data.aof", "ab") as aof:
             aof.write(b"broken")
-        failed = subprocess.run([SERVER, str(port), str(path / "data.aof")], stdout=log, stderr=log, timeout=5)
+        failed = subprocess.run([SERVER, str(port), str(path / "data.aof"), "127.0.0.1", MODE], stdout=log, stderr=log, timeout=5)
         check(failed.returncode != 0, "Corrupt AOF was silently accepted")
         print("Server integration passed: protocol, concurrency, restart, and shutdown")
     finally:

@@ -7,7 +7,7 @@ Run the bundled server as a single-node cache within a controlled network. Nativ
 The process accepts:
 
 ```text
-kv_server [port=8080] [aof=appendonly.aof] [bind=127.0.0.1]
+kv_server [port=8080] [aof=appendonly.aof] [bind=127.0.0.1] [sync=group|always]
 ```
 
 Use `kv_server --help` for the same usage information. Ports must be in `1`–`65535`; addresses must be numeric IPv4. Hostname resolution and IPv6 are not implemented.
@@ -55,9 +55,9 @@ The image is defined against the Ubuntu 24.04 tag. For a release pipeline, recor
 
 ## Persistence and recovery
 
-Each accepted mutation is written to the append-only file and synchronized before the in-memory mutation and response. The parent directory is also synchronized when the log is opened. A second process cannot use the same log concurrently because the writer holds an exclusive advisory lock.
+Ready mutations share a synchronization barrier in default `group` mode; `always` synchronizes each mutation separately. No batching timer is added. Each accepted mutation is written to the append-only file and synchronized before the in-memory mutation and response. The parent directory is also synchronized when the log is opened. A second process cannot use the same log concurrently because the writer holds an exclusive advisory lock.
 
-Acknowledged writes are covered by an abrupt-process-restart integration test. Actual power-loss durability also depends on the filesystem, storage device, and their synchronization guarantees. Reads and LRU ordering are not persisted. A recovered cache can evict different keys because replay contains mutations rather than read-access history.
+Acknowledged writes are covered by an abrupt-process-restart integration test. Actual power-loss durability also depends on the filesystem, storage device, and their synchronization guarantees. Reads and LRU ordering are not persisted. A recovered cache can evict different keys or restore previously evicted keys because replay contains mutations rather than read-access history. The source of truth must remain outside the cache; use revisioned keys and explicit invalidation.
 
 The log has a 1 GiB default cap. Reaching the cap or encountering a write/sync failure makes the service reject further requests. Resolve the underlying condition and restart. Increasing the limit requires explicit configuration in an embedding application or a rebuilt executable; disk space alone does not override the configured cap. Automatic rotation, snapshots, and compaction are not implemented.
 
@@ -84,7 +84,7 @@ A client can time out after the server commits but before its acknowledgement ar
 
 ## Monitoring and shutdown
 
-Use `KVCacheClient::Stats()` as a protocol-level readiness check. It returns process-local hit/miss counts; it does not expose queue depth, disk usage, latency histograms, or per-client traffic. Collect application-side error-code counts and timings, plus operating-system memory, descriptor, and disk metrics.
+Use `KVCacheClient::Stats()` as a protocol-level readiness check. It returns process-local hit/miss and AOF record/sync/byte counters; it does not expose queue depth, disk usage, latency histograms, or per-client traffic. Collect application-side error-code counts and timings, plus operating-system memory, descriptor, and disk metrics.
 
 Startup and request rejection messages go to standard output/error. Request rejection logging is limited to one message per second and omits keys and values. Configure log collection and retention at the process supervisor.
 

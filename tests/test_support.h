@@ -28,6 +28,7 @@ inline const char* ErrorName(kvrpc::ErrorCode code) {
         case kvrpc::ErrorCode::timeout: return "timeout";
         case kvrpc::ErrorCode::connection: return "connection";
         case kvrpc::ErrorCode::transport: return "transport";
+        case kvrpc::ErrorCode::remote: return "remote";
         case kvrpc::ErrorCode::protocol: return "protocol";
     }
     return "unknown";

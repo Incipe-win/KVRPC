@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### RPC server and measured group commit
+
+- Add public typed RpcServer registration/dispatch and structured remote errors; preserve success framing.
+- Share the bounded poll transport between generic RPC and KVCache; revisit buffered pipelines without the poll delay.
+- Add ready-request group commit, per-mutation baseline mode, AOF counters, and batch ordering/failure tests.
+- Add a read-through profile application and a reproducible C++ network/persistence benchmark with raw A/B trials.
+- Test both sync modes through process death and explicitly test read-driven LRU replay differences.
+
 ### Correctness and reliability
 
 - Wait for complete KVCache mutation acknowledgements and validate echoed response keys.

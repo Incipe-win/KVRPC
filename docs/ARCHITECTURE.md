@@ -30,20 +30,43 @@ The generic serializer handles arithmetic values and strings without external co
 
 KVCache uses a separate big-endian header followed by raw key and value bytes. Its shared definition is in `include/kvrpc/kv_protocol.h`. The server's legacy `protocol.h` forwards to that definition. Neither protocol is self-describing, authenticated, or encrypted.
 
+## Generic RPC dispatch
+
+`RpcServer` owns the shared `TcpServer` event loop. Registration binds a method name to a typed
+callback. Dispatch reads the method, decodes a tuple of fixed-width/scalar/string arguments, rejects
+trailing bytes, invokes the callback, and serializes its return value. Complete requests with unknown
+methods, invalid arguments, or throwing handlers receive a structured error. Their connections remain
+usable; framing errors close the connection. Registration and server execution must not overlap.
+Callbacks run serially; slow callbacks delay other RPC clients. No request multiplexing, schema
+negotiation, or generic callback worker pool is implied.
+
 ## Server execution
 
 The bundled server uses one nonblocking `poll` event loop. It keeps a bounded set of peers and bounded input/output buffers. Each iteration performs bounded reads and accepts; partial responses remain queued until they can be sent. Complete buffered requests are processed in connection order. Incomplete requests expire under a fixed connection deadline.
 
-Application handlers execute serially in the event loop. This intentionally makes mutation order and persistence order agree. It also means synchronous filesystem operations can delay all clients. The server does not claim the throughput of an asynchronous storage engine.
+Application handlers execute serially in the event loop. Each pass gathers at most one complete
+request per ready peer, so connection order is preserved and busy peers cannot monopolize a batch.
+Buffered pipelined requests are revisited without waiting for another poll timeout. Incomplete input
+waits for new bytes rather than spinning.
 
-`CacheService` validates complete frames and coordinates the cache with its log. Each acknowledged mutation follows this sequence:
+`CacheService::HandleBatch` validates frames independently, then follows this sequence:
 
-1. Append the complete mutation record.
-2. Synchronize the log with `fsync`.
-3. Apply the operation to the in-memory cache.
-4. Return a complete protocol acknowledgement.
+1. Collect SET/DEL records in request order; preflight the entire batch against the AOF size limit.
+2. Append each record and perform one shared `fsync` if there are mutations.
+3. Apply SET/GET/DEL/STATS sequentially to the cache, constructing replies.
+4. Return the batch to the transport, which can now send acknowledgements and read results.
 
-A mutation failure marks the service unavailable. Later requests are rejected until the service is restarted after the underlying problem is resolved. This prevents reads from silently exposing a cache state that diverges from a partially written log.
+Malformed peers are rejected independently. A storage or application failure poisons the service;
+no response from that failed batch is sent. Readers outside a batch use the same service mutex and
+cannot observe a partially applied batch. Group commit is a shared durability barrier, not an atomic
+multi-operation transaction: after a crash, unacknowledged records may be replayed, and a partial
+final record is rejected under the strict recovery policy.
+
+The default `group` mode batches whatever is ready without an artificial delay. `always` calls the
+same service once per request, preserving one fsync per mutation as a matched baseline. Read-only
+batches issue no fsync. Both modes still execute disk I/O on the event loop; group commit amortizes
+synchronization rather than making storage asynchronous. A single active client generally cannot
+benefit. The `AOF records` and `AOF syncs` counters expose the achieved average batch size.
 
 ## Cache and recovery semantics
 
@@ -52,6 +75,10 @@ A mutation failure marks the service unavailable. Later requests are rejected un
 AOF replay validates headers and complete bodies before applying each record. The log is held under an exclusive process lock. Startup rejects truncated records, invalid commands, and oversized records instead of silently accepting partial data.
 
 Reads update LRU ordering but are not logged. Replaying writes may therefore produce different eviction choices from the pre-restart process. Persistence reconstructs a bounded cache; it does not turn the cache into an unbounded durable database.
+For example, at capacity 2, SET a, SET b, GET a, SET c leaves a/c live; replaying only mutations
+leaves b/c. An evicted key can therefore return after restart. `test_storage` fixes this contract in
+an executable regression. Applications must use an authoritative source, explicit invalidation,
+and versioned keys where old cache data would otherwise be mistaken for current data.
 
 ## Shutdown
 

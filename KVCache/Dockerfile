@@ -7,6 +7,7 @@ COPY cmake/ cmake/
 COPY include/ include/
 COPY src/ src/
 COPY examples/ examples/
+COPY benchmarks/ benchmarks/
 COPY KVCache/include/ KVCache/include/
 COPY KVCache/src/ KVCache/src/
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \

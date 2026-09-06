@@ -9,7 +9,7 @@ KVRPC supports two independent TCP wire formats. TCP packet boundaries have no m
 | Payload length | 4 bytes | Unsigned, little endian |
 | Payload | Declared length | Serialized values |
 
-A request payload begins with a serialized method-name string, followed by the method's arguments in declaration order. A response payload contains exactly one value of the requested return type. A `void` result requires an empty response payload. Extra bytes after a decoded result are a protocol error.
+A request payload begins with a serialized method-name string, followed by the method's arguments in declaration order. A successful response payload contains exactly one value of the requested return type. A `void` result requires an empty response payload. Extra bytes after a decoded result are a protocol error.
 
 ### Value encoding
 
@@ -23,7 +23,12 @@ A request payload begins with a serialized method-name string, followed by the m
 
 The default payload limit is 2 MiB in each direction. The standalone serializer defaults to a 64 MiB serialization limit. Frame lengths are checked before response allocation. Embedded string lengths are checked against the remaining payload.
 
-Use `int32_t`, `uint32_t`, `int64_t`, and other fixed-width types for portable interfaces. Platform-dependent types such as `long`, pointers, aggregates, and `long double` are not portable RPC signatures. The protocol has no method schema negotiation or structured remote-error envelope.
+Use `int32_t`, `uint32_t`, `int64_t`, and other fixed-width types for portable interfaces. Platform-dependent types such as `long`, pointers, aggregates, and `long double` are not portable RPC signatures. The protocol has no method schema negotiation. The high bit of the response length is an error
+flag; the low 31 bits contain its payload length. An error payload is a serialized `uint32_t` status
+followed by a string: 1 = method not found, 2 = invalid arguments, 3 = handler failure. Exception
+internals are not sent. `RpcClient` validates this envelope and throws `RemoteError`; the fully consumed
+connection remains reusable. Success framing is unchanged. Older clients reject error frames as
+oversized; they must upgrade to inspect remote status. Requests must not set the high bit.
 
 The little-endian encoding preserves the original prototype's wire bytes on ordinary little-endian Linux/macOS systems. Original native-endian peers on big-endian systems need migration.
 
@@ -50,7 +55,9 @@ The maximum complete frame size is 1,114,124 bytes. Keys and values may contain 
 | `SET` | 1 | Key and value | Empty acknowledgement |
 | `GET` | 2 | Key; empty value | Stored bytes, or empty on a miss |
 | `DEL` | 3 | Key; empty value | Empty acknowledgement, including an absent key |
-| `STATS` | 4 | Empty key and value | UTF-8 text: `Hits: N, Misses: N` |
+| `STATS` | 4 | Empty key and value | UTF-8 text: hit/miss and AOF counters |
+
+STATS returns `Hits: N, Misses: N, AOF records: N, AOF syncs: N, AOF bytes: N`. AOF counters count successfully synchronized mutations since process start, excluding replay and the startup directory fsync.
 
 Every response repeats the command and key of its request. The client reads the complete key and value, verifies the echoed key, and then resolves the future. A sent `SET` request alone is not success.
 
@@ -72,7 +79,7 @@ Version 1 has no explicit status code. A missing key and a stored empty value ar
 
 Valid original KVCache version-1 frames remain compatible. The implementation now rejects invalid magic/version values, unknown commands, excessive lengths, illegal command bodies, mismatched response keys, and unexpected mutation payloads. The bundled server now implements deletion.
 
-Generic RPC framing must never be sent to the KVCache port. The server does not implement generic `RpcClient::Call` dispatch.
+Generic RPC framing must never be sent to the KVCache port. Use a separate `RpcServer` listener for generic `RpcClient::Call` dispatch.
 
 ## Failure reporting
 
@@ -87,6 +94,7 @@ Generic RPC framing must never be sent to the KVCache port. The server does not 
 | `connection` | TCP connection could not be established |
 | `transport` | Established connection failed during a transfer |
 | `protocol` | Peer response failed framing or payload validation |
+| `remote` | Complete RPC error envelope; `RemoteError::status()` identifies the remote failure |
 
 Allocation failures and standalone serializer errors retain their standard C++ exception types. Validation before dispatch can throw synchronously; execution and overload errors are observed through `future::get()`.
 

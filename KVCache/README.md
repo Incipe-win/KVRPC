@@ -25,7 +25,7 @@ The server runs in the foreground and handles `SIGINT`/`SIGTERM`. Mutation ackno
 
 ## Design and limits
 
-The server handles TCP peers with a bounded nonblocking `poll` loop. Handlers execute serially, including persistence. Cache access is mutex-protected, and the total entry capacity is divided across shards. Per-shard LRU eviction can occur before the aggregate capacity is fully used.
+The server handles TCP peers with a bounded nonblocking `poll` loop. Handlers execute serially. Default group commit synchronizes ready mutations together before applying the batch and sending replies; pass `always` as the fourth argument for per-mutation fsync. Cache access is mutex-protected, and the total entry capacity is divided across shards. Per-shard LRU eviction can occur before the aggregate capacity is fully used.
 
 The executable defaults to 1,000 cache entries, 16 shards, 128 peers, and a 1 GiB AOF limit. Keys are limited to 64 KiB and values to 1 MiB. This is a single-node cache: replication, TTL, HTTP, authentication, TLS, and log compaction are not implemented.
 
@@ -42,7 +42,7 @@ xmake run test_sharded_cache
 xmake run benchmark_cache
 ```
 
-This optional path may download its test dependencies. Cache microbenchmarks measure in-memory operations, not server or persistence throughput. Earlier benchmark numbers have been removed because they do not establish performance for the current implementation. Record fresh measurements with their hardware, compiler, workload, and revision before making performance claims.
+This optional path may download its test dependencies. Cache microbenchmarks measure in-memory operations, not server or persistence throughput. Earlier benchmark numbers have been removed because they do not establish performance for the current implementation. The root [performance report](../docs/PERFORMANCE.md) provides fresh network/persistence A/B measurements with raw trials.
 
 ## License
 

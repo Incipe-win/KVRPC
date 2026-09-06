@@ -9,7 +9,7 @@ target("kvrpc")
     add_files("src/*.cpp")
     add_headerfiles("include/(kvrpc/*.h)")
 
-for _, name in ipairs({"serializer", "connection_pool", "rpc_client", "kvcache_client", "transport", "executor"}) do
+for _, name in ipairs({"serializer", "connection_pool", "rpc_client", "rpc_server", "kvcache_client", "transport", "executor"}) do
     target("test_" .. name)
         set_kind("binary")
         add_deps("kvrpc")
@@ -27,7 +27,7 @@ if is_plat("linux") then
         set_kind("static")
         add_deps("kvrpc")
         add_includedirs("KVCache/include", {public = true})
-        add_files("KVCache/src/tcp_server.cpp", "KVCache/src/aof.cpp")
+        add_files("KVCache/src/aof.cpp")
     target("kv_server")
         set_kind("binary")
         add_deps("kvcache")
@@ -38,3 +38,19 @@ if is_plat("linux") then
         add_files("tests/test_storage.cpp")
         add_tests("default")
 end
+
+for _, name in ipairs({"rpc_server", "rpc_client"}) do
+    target("kvrpc_" .. name)
+        set_kind("binary")
+        add_deps("kvrpc")
+        add_files("examples/" .. name .. ".cpp")
+end
+
+target("profile_demo")
+    set_kind("binary")
+    add_deps("kvrpc")
+    add_files("examples/profile_demo.cpp")
+target("kv_bench")
+    set_kind("binary")
+    add_deps("kvrpc")
+    add_files("benchmarks/kv_bench.cpp")
