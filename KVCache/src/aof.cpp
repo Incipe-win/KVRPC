@@ -1,103 +1,83 @@
 #include "aof.h"
-
+#include <cerrno>
 #include <filesystem>
-#include <iostream>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace kvcache {
-
-AofLogger::AofLogger(const std::string& filename, int interval_ms)
-    : filename_(filename), interval_ms_(interval_ms), running_(false) {
-}
-
-AofLogger::~AofLogger() {
-    stop();
-}
-
-void AofLogger::start() {
-    running_ = true;
-    flush_thread_ = std::thread(&AofLogger::flushLoop, this);
-}
-
-void AofLogger::stop() {
-    if (!running_) return;
-    running_ = false;
-    queue_cv_.notify_all();
-    if (flush_thread_.joinable()) {
-        flush_thread_.join();
+namespace {
+void ReadExact(int fd, char* data, size_t size) {
+    while (size) {
+        auto n = read(fd, data, size);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) throw std::runtime_error("AOF is truncated or unreadable; restore a verified backup");
+        data += n; size -= static_cast<size_t>(n);
     }
 }
-
+}
+AofLogger::AofLogger(const std::string& filename, size_t max_bytes) : max_bytes_(max_bytes) {
+    fd_ = open(filename.c_str(), O_CREAT | O_RDWR | O_APPEND | O_CLOEXEC, 0600);
+    if (fd_ < 0) throw std::runtime_error("Cannot open AOF");
+    try {
+        if (flock(fd_, LOCK_EX | LOCK_NB) < 0) throw std::runtime_error("AOF is locked by another process");
+        struct stat info{};
+        if (fstat(fd_, &info) < 0 || !S_ISREG(info.st_mode) || info.st_size < 0 ||
+            static_cast<uint64_t>(info.st_size) > max_bytes_)
+            throw std::runtime_error("Invalid AOF type or size limit exceeded");
+        bytes_ = static_cast<size_t>(info.st_size);
+        // Persist the directory entry as well as subsequent file contents.
+        auto parent = std::filesystem::path(filename).parent_path();
+        int directory = open(parent.empty() ? "." : parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (directory < 0) throw std::runtime_error("Cannot open AOF directory");
+        int result = fsync(directory);
+        close(directory);
+        if (result < 0) throw std::runtime_error("Cannot sync AOF directory");
+    } catch (...) { close(fd_); fd_ = -1; throw; }
+}
+AofLogger::~AofLogger() { if (fd_ >= 0) close(fd_); }
+void AofLogger::start() { std::lock_guard<std::mutex> lock(mutex_); started_ = true; }
+void AofLogger::stop() { std::lock_guard<std::mutex> lock(mutex_); started_ = false; }
 void AofLogger::log(Command cmd, const std::string& key, const std::string& value) {
+    if (cmd != Command::SET && cmd != Command::DEL) throw std::invalid_argument("Invalid AOF command");
     auto data = Message::encode(cmd, key, value);
-    {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        queue_.push(std::move(data));
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!started_ || failed_) throw std::runtime_error("AOF is stopped or failed");
+    if (data.size() > max_bytes_ - bytes_) throw std::runtime_error("AOF size limit reached");
+    size_t offset = 0;
+    while (offset < data.size()) {
+        auto n = write(fd_, data.data() + offset, data.size() - offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { failed_ = true; throw std::runtime_error("AOF write failed"); }
+        offset += static_cast<size_t>(n);
     }
-    queue_cv_.notify_one();
+    int result;
+    do { result = fsync(fd_); } while (result < 0 && errno == EINTR);
+    if (result < 0) { failed_ = true; throw std::runtime_error("AOF sync failed"); }
+    bytes_ += data.size();
 }
-
-void AofLogger::flushLoop() {
-    std::ofstream outfile;
-    outfile.open(filename_, std::ios::app | std::ios::binary);
-
-    while (running_) {
-        std::unique_lock<std::mutex> lock(queue_mutex_);
-        if (queue_cv_.wait_for(lock, std::chrono::milliseconds(interval_ms_),
-                               [this] { return !queue_.empty() || !running_; })) {
-            while (!queue_.empty()) {
-                auto& data = queue_.front();
-                outfile.write(reinterpret_cast<const char*>(data.data()), data.size());
-                queue_.pop();
-            }
-            outfile.flush();
-        }
-    }
-
-    // Flush remaining
-    {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        while (!queue_.empty()) {
-            auto& data = queue_.front();
-            outfile.write(reinterpret_cast<const char*>(data.data()), data.size());
-            queue_.pop();
-        }
-        outfile.flush();
-    }
-    outfile.close();
-}
-
 void AofLogger::replay(ReplayCallback callback) {
-    if (!std::filesystem::exists(filename_)) return;
-
-    std::ifstream infile(filename_, std::ios::binary);
-    if (!infile.is_open()) return;
-
-    std::vector<uint8_t> buffer;
-    // Read file in chunks or message by message
-    // Since our protocol has length, we can read header then body.
-
-    while (infile.peek() != EOF) {
-        Header header;
-        if (!infile.read(reinterpret_cast<char*>(&header), HEADER_SIZE)) break;
-
-        // Convert from network byte order
-        header.magic = ntohs(header.magic);
-        header.key_len = ntohl(header.key_len);
-        header.value_len = ntohl(header.value_len);
-
-        if (header.magic != MAGIC) {
-            std::cerr << "AOF Corrupted: Invalid Magic" << std::endl;
-            break;
-        }
-
-        std::string key(header.key_len, '\0');
-        std::string value(header.value_len, '\0');
-
-        if (header.key_len > 0) infile.read(&key[0], header.key_len);
-        if (header.value_len > 0) infile.read(&value[0], header.value_len);
-
-        callback(static_cast<Command>(header.command), key, value);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (started_) throw std::logic_error("Replay must precede start");
+    if (lseek(fd_, 0, SEEK_SET) < 0) throw std::runtime_error("Cannot seek AOF");
+    size_t remaining = bytes_;
+    while (remaining) {
+        if (remaining < HEADER_SIZE) throw std::runtime_error("Truncated AOF header");
+        uint8_t bytes[HEADER_SIZE];
+        ReadExact(fd_, reinterpret_cast<char*>(bytes), HEADER_SIZE);
+        auto h = Message::decodeHeader(bytes);
+        Message::validate(h);
+        if ((h.command != static_cast<uint8_t>(Command::SET) && h.command != static_cast<uint8_t>(Command::DEL)) ||
+            (h.command == static_cast<uint8_t>(Command::DEL) && h.value_len))
+            throw std::runtime_error("Invalid AOF operation");
+        remaining -= HEADER_SIZE;
+        size_t body = size_t(h.key_len) + h.value_len;
+        if (body > remaining) throw std::runtime_error("Truncated AOF body");
+        std::string key(h.key_len, '\0'), value(h.value_len, '\0');
+        ReadExact(fd_, key.data(), key.size()); ReadExact(fd_, value.data(), value.size());
+        callback(static_cast<Command>(h.command), key, value);
+        remaining -= body;
     }
 }
-
 }  // namespace kvcache

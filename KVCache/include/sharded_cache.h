@@ -1,6 +1,8 @@
 #pragma once
 
 #include <functional>
+#include <algorithm>
+#include <stdexcept>
 #include <memory>
 #include <vector>
 
@@ -12,9 +14,11 @@ template <typename Key, typename Value, typename Hash = std::hash<Key>>
 class ShardedCache {
 public:
     ShardedCache(size_t capacity, size_t num_shards = 16) : num_shards_(num_shards), hash_() {
-        size_t capacity_per_shard = (capacity + num_shards - 1) / num_shards;
-        for (size_t i = 0; i < num_shards; ++i) {
-            shards_.emplace_back(std::make_unique<LRUCache<Key, Value>>(capacity_per_shard));
+        if (!capacity || !num_shards) throw std::invalid_argument("Capacity and shard count must be positive");
+        num_shards_ = std::min(capacity, num_shards);
+        for (size_t i = 0; i < num_shards_; ++i) {
+            shards_.emplace_back(std::make_unique<LRUCache<Key, Value>>(
+                capacity / num_shards_ + (i < capacity % num_shards_ ? 1 : 0)));
         }
     }
 
@@ -25,6 +29,8 @@ public:
     std::optional<Value> get(const Key& key) {
         return getShard(key).get(key);
     }
+
+    bool remove(const Key& key) { return getShard(key).remove(key); }
 
     bool exists(const Key& key) {
         return getShard(key).exists(key);

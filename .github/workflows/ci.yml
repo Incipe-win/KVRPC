@@ -1,0 +1,54 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            type: Debug
+            flags: ""
+            compiler: g++
+          - os: ubuntu-24.04
+            type: Release
+            flags: ""
+            compiler: g++
+          - os: ubuntu-24.04
+            type: Debug
+            flags: "-DKVRPC_SANITIZE=ON -DCMAKE_CXX_COMPILER=clang++"
+            compiler: clang++
+          - os: macos-14
+            type: Release
+            flags: "-DKVRPC_BUILD_SERVER=OFF"
+            compiler: clang++
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ matrix.type }} ${{ matrix.flags }}
+      - run: cmake --build build --parallel 4
+      - run: ctest --test-dir build --output-on-failure --parallel 4
+      - run: cmake --install build --prefix "$RUNNER_TEMP/kvrpc-install"
+      - name: Verify installed package
+        run: |
+          cmake -S tests/install -B build-consumer -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/kvrpc-install"
+          cmake --build build-consumer
+          ./build-consumer/consumer
+  thread-sanitizer:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DKVRPC_TSAN=ON -DCMAKE_CXX_COMPILER=clang++
+      - run: cmake --build build --parallel 4
+      - run: ctest --test-dir build --output-on-failure --parallel 2
+  container:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f KVCache/Dockerfile -t kvrpc-server:test .
+      - name: Verify container operation and volume recovery
+        run: python3 tests/test_container.py kvrpc-server:test

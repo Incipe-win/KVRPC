@@ -1,47 +1,144 @@
 # KVRPC
 
-**KVRPC** 是一个基于 C++11/C++17 编写的轻量级、高性能异步 RPC 网络通信框架。它是作为 [KVCache](../KVCache) (基于内存的分布式键值存储数据库) 的网络通信引擎而设计的。
+KVRPC is a C++17 TCP client library with asynchronous RPC calls, reusable connections, bounded work queues, and explicit failure handling. The repository also contains a Linux KVCache server for end-to-end development and deployment in a controlled network.
 
-本项目去除了对 gRPC、Protobuf 等重量级第三方库的依赖，使用现代 C++ 原生实现序列化与网络传输层。作为一个高内聚的 C++ 基础架构组件，它在保障极致运行性能的同时，提供了极低的业务接入门槛。
+The client library has no third-party runtime dependencies. It supports a generic length-prefixed RPC format and the KVCache binary protocol. These are separate protocols: the KVCache server accepts KVCache commands only.
 
-## 核心特性
+## Capabilities
 
-* **基于编译期多态的序列化引擎**：完全基于 C++11 的可变参数模板 (Variadic Templates) 与 SFINAE 特性，实现基础类型、字符串类型的零依赖二进制封包与解包。
-* **线程安全的 TCP 连接池**：利用 `std::mutex` 与 `std::condition_variable` 实现了通信连接的高效复用。结合 `std::shared_ptr` 的自定义删除器 (Custom Deleter)，实现了连接被客户端用完后的自动回收（Auto-Release）。
-* **异步非阻塞的 API 抽象模型**：客户端接口底层通过 `std::future` 和 `std::async` 实现网络 I/O 等待与主线程业务逻辑的解耦，使调用网络 RPC 接口像本地异步接口一样自然。
-* **无缝集成 KVCache 存储引擎**：通过内部代理层 (Stub)，将面向用户的 `Get/Set` 调用自动组装为包含 `<magic, command, key_len, value_len>` `Header` 和对应 `Payload` 的二进制网络协议报文，实现与后端 KVCache 分布式节点的高效连通。
+- Fixed-size worker pools return `std::future` results and reject excess queued work.
+- TCP operations handle partial transfers, interrupted system calls, disconnects, and deadlines.
+- Connection leases remain valid after their pool wrapper is destroyed; failed connections are discarded before reuse.
+- Response headers, lengths, commands, keys, and decoded payloads are validated before results are returned.
+- KVCache supports `SET`, `GET`, `DEL`, and `STATS`, with binary-safe keys and values.
+- The server acknowledges mutations after appending and synchronizing its log, and rejects corrupt logs at startup.
+- Automated tests cover protocol compatibility, concurrency, overload, failure handling, persistence, and process lifecycle.
 
-## 架构设计流
+## Build and test
 
-1. **Client / Stub**：向业务开发者提供透明的、面向对象的 `client.Set("key", "value")` 异步接口。
-2. **Future / Async 层**：异步发起请求并将网络 I/O 挂起在后台线程，立刻返回 `std::future<T>` 句柄给主线程。
-3. **Connection Pool**：从预先分配好的 Socket 队列中，安全地取出一个空闲的 TCP 长连接。
-4. **Serializer**：将请求上下文、命令类型直接打包序列化为紧凑的内存字节序列 (`std::vector<uint8_t>`)。
-5. **Transport Layer**：通过 TCP Socket 投递字节流至远端 KVCache 服务器。
+Requirements: a C++17 compiler, CMake 3.16 or newer, and POSIX threads. Linux builds include the server; macOS builds provide the client library. Python 3 is required for the Linux integration test. No dependency downloads are required for the CMake build.
 
-## 快速编译与运行测试
-
-### 依赖环境
-* Linux / macOS
-* 支持 C++17 的编译器 (GCC 7+ / Clang 5+)
-* [Xmake](https://xmake.io/) 构建管理工具
-
-### 执行编译与测试
-
-```bash
-# 配置为 Release 模式并编译整个项目及所有的测试桩
-xmake f -m release
-xmake 
-
-# 1. 运行泛型序列化引擎单元测试
-xmake run test_serializer
-
-# 2. 运行连接池并发获取释放测试
-xmake run test_connection_pool
-
-# 3. 运行 RPC Future 异步回调机制全链路测试
-xmake run test_rpc_client
-
-# 4. 运行基于协议 Header (protocol.h) 结合 KVCache 的兼容性代理测试
-xmake run test_kvcache_client
+```sh
+cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release
+cmake --build build/release --parallel 4
+ctest --test-dir build/release --output-on-failure --parallel 4
 ```
+
+Tests create local TCP listeners on dynamically allocated loopback ports. They start their own servers and use temporary persistence files. A sandbox that prohibits sockets must grant local-network test access.
+
+To build only the library and example:
+
+```sh
+cmake -S . -B build/client -DCMAKE_BUILD_TYPE=Release \
+  -DKVRPC_BUILD_SERVER=OFF -DBUILD_TESTING=OFF
+cmake --build build/client --parallel 4
+```
+
+The root [Xmake configuration](xmake.lua) is also maintained:
+
+```sh
+xmake f -m release
+xmake
+xmake test
+```
+
+CMake/CTest is the primary verification path. The historical cache benchmarks under `KVCache/tests` use Google Benchmark and GoogleTest through the separate KVCache Xmake build.
+
+## Run the server and example
+
+From the repository root, start the server in one terminal:
+
+```sh
+mkdir -p build/data
+./build/release/kv_server 8080 build/data/appendonly.aof 127.0.0.1
+```
+
+Run the C++ example in another terminal:
+
+```sh
+./build/release/kvrpc_example 8080
+```
+
+`SIGINT` and `SIGTERM` stop the listener and close its client connections. The server defaults to loopback and stores its append-only log at the supplied path.
+
+## Use the client
+
+```cpp
+#include <kvrpc/kvcache_client.h>
+#include <chrono>
+#include <iostream>
+#include <memory>
+
+int main() {
+    using namespace std::chrono_literals;
+    auto pool = std::make_shared<kvrpc::ConnectionPool>(
+        "127.0.0.1", 8080, 4,
+        kvrpc::TransportOptions{2s, 5s}, 5s);
+    kvrpc::KVCacheClient client(pool);
+
+    try {
+        client.Set("user:42:name", "Ada").get();
+        auto pending = client.Get("user:42:name");
+        std::cout << pending.get() << '\n';
+        client.Delete("user:42:name").get();
+    } catch (const kvrpc::Error& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
+    }
+}
+```
+
+Wait for a successful `Set` before issuing a dependent `Get`. Concurrent calls can execute on different connections and have no submission-order guarantee. `Set` and `Delete` return `true` after a valid acknowledgement; failures throw. Version 1 returns an empty string for both a missing key and a stored empty value.
+
+`RpcClient::Call<T>(method, args...)` uses the generic protocol described in [Protocol reference](docs/PROTOCOL.md). Applications must supply a compatible generic RPC server. Use fixed-width integer types in RPC signatures.
+
+### Resource limits and lifetime
+
+| Setting | Default | Configuration |
+| --- | --- | --- |
+| Connection slots | Required constructor argument | `ConnectionPool`, 1–4,096 |
+| Connection timeout | 2 seconds | `TransportOptions::connect_timeout` |
+| Pool acquisition timeout | 5 seconds | `ConnectionPool` constructor |
+| Total socket I/O deadline per request | 5 seconds | `TransportOptions::io_timeout` |
+| Worker threads per client | 4 | `ClientOptions::workers`, 1–256 |
+| Waiting tasks per client | 64 | `ClientOptions::queue_capacity`, 1–65,536 |
+| Generic RPC payload limit | 2 MiB | `ClientOptions::max_frame_bytes`, up to 64 MiB |
+| KVCache key / value limit | 64 KiB / 1 MiB | Protocol constants |
+
+Pool acquisition, connection establishment, and request I/O have separate budgets. Time spent waiting in the client queue is additional. Request I/O uses one monotonic deadline across the complete send/receive exchange, so incremental traffic does not extend it.
+
+Clients accept concurrent calls. Destruction drains admitted work and joins workers; it can therefore wait for queued requests and their timeouts. Stop submitting calls before destroying a client or pool. A lease can outlive its pool, and an already-submitted future can outlive its client. Connections themselves require exclusive use. Explicit `ConnectionPool::Close()` wakes acquisition waiters and prevents new leases, while existing leases finish normally.
+
+Queue overload and execution errors are delivered through futures. Invalid configuration and locally detected oversized requests fail synchronously. Always observe futures. Requests are never retried automatically because a transport failure after sending a mutation has an ambiguous outcome.
+
+## Install and consume
+
+```sh
+cmake --install build/release --prefix "$HOME/.local"
+```
+
+In a consuming project:
+
+```cmake
+find_package(KVRPC 1 REQUIRED CONFIG)
+add_executable(my_app main.cpp)
+target_link_libraries(my_app PRIVATE KVRPC::kvrpc)
+```
+
+Pass `-DCMAKE_PREFIX_PATH="$HOME/.local"` when configuring the consuming project. Public headers include the KVCache protocol; consumers do not need a sibling KVCache checkout.
+
+## Deployment scope
+
+The server is a single-node, entry-bounded LRU cache with synchronous append-only persistence. It has no replication, clustering, authentication, TLS, TTL, HTTP endpoint, automatic log compaction, or generic RPC dispatch. Deploy it on loopback or an access-controlled private network; use an authenticated transport boundary where remote access is required.
+
+The repository supplies tested correctness and resource controls, not a workload-independent production certification. Capacity, latency, recovery procedures, filesystem behavior, and network controls must be validated for the deployment. See [Operations](docs/OPERATIONS.md) for concrete limits and recovery procedures.
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md): ownership, concurrency, and failure behavior.
+- [Protocol reference](docs/PROTOCOL.md): byte layouts and compatibility constraints.
+- [Operations](docs/OPERATIONS.md): deployment, persistence, monitoring, and recovery.
+- [Contributing](CONTRIBUTING.md): development and verification commands.
+- [Validation record](docs/VALIDATION.md): local test results and unverified scope.
+- [Changes](CHANGELOG.md): behavior changes from the original prototype.
+- [KVCache](KVCache/README.md): bundled server and cache components.

@@ -1,53 +1,24 @@
 #pragma once
-
 #include <atomic>
+#include <cstdint>
 #include <functional>
-#include <memory>
-#include <mutex>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
-#include "thread_pool.h"
-
 namespace kvcache {
-
-struct Connection {
-    int fd;
-    std::vector<uint8_t> read_buffer;
-    std::mutex mutex;  // Protect buffer
-};
-
 class TcpServer {
 public:
-    // Handler takes raw bytes and returns response bytes
-    // It also returns how many bytes were consumed. If 0, it means we need more
-    // data.
     using Handler = std::function<std::vector<uint8_t>(const std::vector<uint8_t>&, size_t&)>;
-
-    TcpServer(int port, int thread_pool_size = 4);
-    ~TcpServer();
-
+    explicit TcpServer(int port, std::string bind_address = "127.0.0.1", size_t max_connections = 128);
+    // start blocks; call stop and join the start thread before destroying the server.
     void start();
-    void stop();
-    void setHandler(Handler handler);
-
+    void stop() noexcept { stopping_ = true; }
+    void setHandler(Handler handler) { handler_ = std::move(handler); }
 private:
     int port_;
-    int server_fd_;
-    int epoll_fd_;
-    std::atomic<bool> running_;
-    ThreadPool thread_pool_;
+    std::string bind_address_;
+    size_t max_connections_;
+    std::atomic<bool> stopping_{false};
     Handler handler_;
-
-    std::mutex connections_mutex_;
-    std::unordered_map<int, std::shared_ptr<Connection>> connections_;
-
-    void eventLoop();
-    void handleNewConnection();
-    void handleClientData(int client_fd);
-    void setNonBlocking(int fd);
-    void removeConnection(int fd);
 };
-
 }  // namespace kvcache

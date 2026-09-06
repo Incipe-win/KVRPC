@@ -1,5 +1,9 @@
-/build/
+/build*/
 /.xmake/
+/.cache/
+/compile_commands.json
+**/__pycache__/
+*.aof
 *.o
 *.a
 *.so

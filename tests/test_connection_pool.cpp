@@ -1,48 +1,42 @@
-#include <cassert>
-#include <iostream>
-#include <thread>
-#include <vector>
-
 #include "kvrpc/connection_pool.h"
-
-using namespace kvrpc;
-
-void test_pool_concurrency() {
-    // We create a mocked pool with 2 "slots"
-    // Since we are not actually running a server on port 9999,
-    // the Connect() inside pool will fail and IsConnected() == false.
-    // That's fine, we are just testing the pool's thread synchronization
-    // mechanisms and custom deleter here.
-    ConnectionPool pool("127.0.0.1", 9999, 2);
-
-    auto worker = [&pool](int id) {
-        std::cout << "Thread " << id << " waiting for connection..." << std::endl;
-        auto conn = pool.Acquire();
-        std::cout << "Thread " << id << " acquired connection (connected=" << conn->IsConnected() << ")" << std::endl;
-
-        // Simulate some work taking time...
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-        std::cout << "Thread " << id << " releasing connection..." << std::endl;
-        // conn goes out of scope and custom deleter is called here!
-    };
-
-    // We have 2 pool slots, but spawn 4 threads!
-    // Threads 3 and 4 should block and successfully wait for 1 and 2 to free
-    // their connections.
-    std::vector<std::thread> threads;
-    for (int i = 1; i <= 4; ++i) {
-        threads.emplace_back(worker, i);
-    }
-
-    for (auto& t : threads) {
-        t.join();
-    }
-
-    std::cout << "All Connection Pool concurrency tests passed!" << std::endl;
-}
+#include "test_support.h"
+#include <atomic>
+using namespace std::chrono_literals;
 
 int main() {
-    test_pool_concurrency();
-    return 0;
+    Throws([&] { kvrpc::ConnectionPool pool("127.0.0.1", 1, 0); });
+    Throws([&] { kvrpc::ConnectionPool pool("bad", 1, 1); });
+    TestServer server([](int fd) { char byte; while (recv(fd, &byte, 1, 0) > 0) {} });
+    auto pool = std::make_unique<kvrpc::ConnectionPool>("127.0.0.1", server.port(), 1, kvrpc::TransportOptions{}, 100ms);
+    auto lease = pool->Acquire();
+    ErrorIs(kvrpc::ErrorCode::timeout, [&] { pool->Acquire(); });
+    auto raw = lease.get(); lease.reset();
+    lease = pool->Acquire(); CHECK(lease.get() == raw);
+    auto waiting = std::async(std::launch::async, [&] { ErrorIs(kvrpc::ErrorCode::closed, [&] { pool->Acquire(); }); });
+    pool->Close(); waiting.get();
+    pool.reset(); CHECK(lease->IsConnected()); // Outstanding leases survive the wrapper.
+    lease.reset(); server.Finish();
+
+    TestServer concurrent([](int fd) { char byte; while (recv(fd, &byte, 1, 0) > 0) {} });
+    kvrpc::ConnectionPool shared("127.0.0.1", concurrent.port(), 1);
+    std::atomic<int> active{0};
+    std::vector<std::future<void>> workers;
+    for (int i = 0; i < 12; ++i) workers.push_back(std::async(std::launch::async, [&] {
+        for (int j = 0; j < 25; ++j) {
+            auto connection = shared.Acquire(); CHECK(active.fetch_add(1) == 0);
+            std::this_thread::yield(); CHECK(active.fetch_sub(1) == 1);
+        }
+    }));
+    for (auto& worker : workers) worker.get();
+    shared.Close(); concurrent.Finish();
+    // A bound, non-listening socket reserves a port that deterministically refuses connections.
+    int reserved = socket(AF_INET, SOCK_STREAM, 0); CHECK(reserved >= 0);
+    sockaddr_in address{}; address.sin_family = AF_INET; address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    CHECK(bind(reserved, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    socklen_t address_size = sizeof(address);
+    CHECK(getsockname(reserved, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+    kvrpc::ConnectionPool refused("127.0.0.1", ntohs(address.sin_port), 1, {100ms, 100ms}, 100ms);
+    for (int i = 0; i < 3; ++i)
+        ErrorIs(kvrpc::ErrorCode::connection, [&] { refused.Acquire(); });
+    close(reserved);
 }

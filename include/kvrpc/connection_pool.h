@@ -1,71 +1,68 @@
 #pragma once
-
+#include "kvrpc/error.h"
+#include "kvrpc/tcp_connection.h"
+#include <arpa/inet.h>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
-#include <queue>
-
-#include "kvrpc/tcp_connection.h"
+#include <vector>
 
 namespace kvrpc {
-
 class ConnectionPool {
-   private:
+    struct State {
+        std::mutex mutex;
+        std::condition_variable ready;
+        std::vector<std::unique_ptr<TcpConnection>> free;
+        bool closed = false;
+    };
+public:
+    ConnectionPool(const std::string& ip, uint16_t port, size_t size,
+                   TransportOptions options = {}, std::chrono::milliseconds acquire_timeout = std::chrono::seconds(5))
+        : state_(std::make_shared<State>()), ip_(ip), port_(port), acquire_timeout_(acquire_timeout) {
+        in_addr address{};
+        if (!size || size > 4096 || !port || inet_pton(AF_INET, ip.c_str(), &address) != 1 ||
+            acquire_timeout.count() <= 0 || acquire_timeout > std::chrono::hours(24))
+            throw Error(ErrorCode::invalid_argument, "Invalid pool size, IPv4 address, port, or acquire timeout");
+        state_->free.reserve(size);
+        for (size_t i = 0; i < size; ++i) state_->free.emplace_back(std::make_unique<TcpConnection>(options));
+    }
+    ~ConnectionPool() { Close(); }
+    ConnectionPool(const ConnectionPool&) = delete;
+    ConnectionPool& operator=(const ConnectionPool&) = delete;
+    void Close() noexcept {
+        auto state = state_;
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->closed = true;
+            state->free.clear();
+        }
+        state->ready.notify_all();
+    }
+    std::shared_ptr<TcpConnection> Acquire() {
+        auto state = state_;
+        std::unique_lock<std::mutex> lock(state->mutex);
+        if (!state->ready.wait_for(lock, acquire_timeout_, [&] { return state->closed || !state->free.empty(); }))
+            throw Error(ErrorCode::timeout, "Connection pool acquisition timed out");
+        if (state->closed) throw Error(ErrorCode::closed, "Connection pool is closed");
+        auto owned = std::move(state->free.back());
+        state->free.pop_back();
+        lock.unlock();
+        // The lease owns State, never a raw pointer to the ConnectionPool wrapper.
+        std::shared_ptr<TcpConnection> conn(owned.release(), [state](TcpConnection* p) noexcept {
+            std::unique_ptr<TcpConnection> returned(p);
+            std::lock_guard<std::mutex> guard(state->mutex);
+            if (!state->closed) state->free.push_back(std::move(returned));
+            state->ready.notify_one();
+        });
+        if (!conn->IsConnected() && !conn->Connect(ip_, port_))
+            throw Error(conn->TimedOut() ? ErrorCode::timeout : ErrorCode::connection, "Unable to connect to server");
+        conn->BeginRequest();
+        return conn;
+    }
+private:
+    std::shared_ptr<State> state_;
     std::string ip_;
     uint16_t port_;
-    size_t pool_size_;
-
-    std::queue<TcpConnection*> free_connections_;
-    std::mutex mutex_;
-    std::condition_variable cond_;
-
-   public:
-    ConnectionPool(const std::string& ip, uint16_t port, size_t pool_size)
-        : ip_(ip), port_(port), pool_size_(pool_size) {
-        // Initialize the pool with pre-connected sockets (or lazily connected)
-        // Here we initialize them lazy or proactively. Let's do lazy loading inside
-        // Acquire. But for pool budgeting, we just push `pool_size` empty
-        // connections.
-        for (size_t i = 0; i < pool_size_; ++i) {
-            free_connections_.push(new TcpConnection());
-        }
-    }
-
-    ~ConnectionPool() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        while (!free_connections_.empty()) {
-            TcpConnection* conn = free_connections_.front();
-            free_connections_.pop();
-            delete conn;
-        }
-    }
-
-    // Returns a connection wrapped in a shared_ptr with a custom deleter
-    // The custom deleter returns the connection back to the pool!
-    std::shared_ptr<TcpConnection> Acquire() {
-        std::unique_lock<std::mutex> lock(mutex_);
-        cond_.wait(lock, [this]() { return !free_connections_.empty(); });
-
-        TcpConnection* conn = free_connections_.front();
-        free_connections_.pop();
-        lock.unlock();  // drop lock while connecting
-
-        if (!conn->IsConnected()) {
-            // Lazy connect. If it fails, we still return it but it's disconnected.
-            // Client should handle the failure.
-            conn->Connect(ip_, port_);
-        }
-
-        // Custom deleter: return to pool
-        return std::shared_ptr<TcpConnection>(conn, [this](TcpConnection* p) { this->Release(p); });
-    }
-
-   private:
-    void Release(TcpConnection* conn) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        free_connections_.push(conn);
-        cond_.notify_one();
-    }
+    std::chrono::milliseconds acquire_timeout_;
 };
-
 }  // namespace kvrpc

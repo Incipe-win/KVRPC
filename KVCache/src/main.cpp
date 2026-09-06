@@ -1,110 +1,41 @@
-#include <iostream>
-#include <string>
-#include <vector>
-
-#include "aof.h"
-#include "protocol.h"
-#include "sharded_cache.h"
+#include "cache_service.h"
 #include "tcp_server.h"
-
-using namespace kvcache;
-
-std::vector<uint8_t> handle_request(ShardedCache<std::string, std::string>& cache, AofLogger& aof,
-                                    const std::vector<uint8_t>& data, size_t& consumed) {
-    if (data.size() < HEADER_SIZE) {
-        consumed = 0;
-        return {};
-    }
-
-    Header header = Message::decodeHeader(data.data());
-
-    if (header.magic != MAGIC) {
-        consumed = 1;
-        return {};
-    }
-
-    size_t total_len = HEADER_SIZE + header.key_len + header.value_len;
-    if (data.size() < total_len) {
-        consumed = 0;
-        return {};
-    }
-
-    consumed = total_len;
-
-    std::string key(reinterpret_cast<const char*>(data.data() + HEADER_SIZE), header.key_len);
-    std::string value;
-    if (header.value_len > 0) {
-        value.assign(reinterpret_cast<const char*>(data.data() + HEADER_SIZE + header.key_len), header.value_len);
-    }
-
-    Command cmd = static_cast<Command>(header.command);
-    std::string response_val;
-    Command response_cmd = cmd;
-
-    switch (cmd) {
-        case Command::SET:
-            cache.put(key, value);
-            aof.log(cmd, key, value);
-            break;
-        case Command::GET: {
-            auto val = cache.get(key);
-            if (val) {
-                response_val = *val;
-            }
-            break;
-        }
-        case Command::DEL:
-            // cache.remove(key);
-            // aof.log(cmd, key, "");
-            break;
-        case Command::STATS: {
-            auto stats = cache.getStats();
-            response_val = "Hits: " + std::to_string(stats.hits) + ", Misses: " + std::to_string(stats.misses);
-            break;
-        }
-        default:
-            break;
-    }
-
-    return Message::encode(response_cmd, key, response_val);
-}
+#include <csignal>
+#include <iostream>
+#include <pthread.h>
+#include <thread>
 
 int main(int argc, char** argv) {
-    int port = 8080;
-    if (argc > 1) {
-        port = std::stoi(argv[1]);
+    if (argc > 1 && std::string(argv[1]) == "--help") {
+        std::cout << "Usage: kv_server [port=8080] [aof=appendonly.aof] [bind=127.0.0.1]\n";
+        return 0;
     }
-
-    std::cout << "Initializing Sharded Cache..." << std::endl;
-    ShardedCache<std::string, std::string> cache(1000, 16);
-
-    std::cout << "Initializing AOF..." << std::endl;
-    AofLogger aof("appendonly.aof");
-
-    std::cout << "Replaying AOF..." << std::endl;
-    aof.replay([&cache](Command cmd, const std::string& key, const std::string& value) {
-        if (cmd == Command::SET) {
-            cache.put(key, value);
-        } else if (cmd == Command::DEL) {
-            // cache.remove(key);
-        }
-    });
-
-    aof.start();
-
-    std::cout << "Starting Server on port " << port << "..." << std::endl;
-    TcpServer server(port);
-
-    server.setHandler([&cache, &aof](const std::vector<uint8_t>& data, size_t& consumed) {
-        return handle_request(cache, aof, data, consumed);
-    });
-
     try {
-        server.start();
+        if (argc > 4) throw std::invalid_argument("Too many arguments; use --help");
+        size_t parsed = 0;
+        const std::string port_text = argc > 1 ? argv[1] : "8080";
+        int port = std::stoi(port_text, &parsed);
+        if (parsed != port_text.size()) throw std::invalid_argument("Invalid port");
+        sigset_t signals;
+        sigemptyset(&signals); sigaddset(&signals, SIGINT); sigaddset(&signals, SIGTERM);
+        if (pthread_sigmask(SIG_BLOCK, &signals, nullptr) != 0) throw std::runtime_error("Cannot block signals");
+        kvcache::CacheService service(1000, 16, argc > 2 ? argv[2] : "appendonly.aof");
+        kvcache::TcpServer server(port, argc > 3 ? argv[3] : "127.0.0.1");
+        server.setHandler([&](const std::vector<uint8_t>& bytes, size_t& consumed) { return service.Handle(bytes, consumed); });
+        std::atomic<bool> done{false};
+        std::thread shutdown([&] {
+            while (!done) {
+                timespec timeout{0, 100000000};
+                int signal = sigtimedwait(&signals, nullptr, &timeout);
+                if (signal == SIGINT || signal == SIGTERM) { server.stop(); return; }
+            }
+        });
+        try { server.start(); }
+        catch (...) { done = true; shutdown.join(); throw; }
+        done = true; shutdown.join();
+        return 0;
     } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
+        std::cerr << "kv_server: " << e.what() << '\n';
         return 1;
     }
-
-    return 0;
 }

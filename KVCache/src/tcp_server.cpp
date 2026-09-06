@@ -1,197 +1,135 @@
 #include "tcp_server.h"
-
+#include "protocol.h"
+#include <arpa/inet.h>
+#include <cerrno>
+#include <chrono>
 #include <fcntl.h>
-#include <netinet/in.h>
-#include <sys/epoll.h>
+#include <iostream>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
-
 #include <array>
-#include <cstring>
-#include <iostream>
-#include <vector>
+#include <memory>
+#include <stdexcept>
 
 namespace kvcache {
-
-constexpr int MAX_EVENTS = 64;
-constexpr int BUFFER_SIZE = 4096;
-
-TcpServer::TcpServer(int port, int thread_pool_size)
-    : port_(port), server_fd_(-1), epoll_fd_(-1), running_(false), thread_pool_(thread_pool_size) {}
-
-TcpServer::~TcpServer() { stop(); }
-
-void TcpServer::setHandler(Handler handler) { handler_ = std::move(handler); }
-
-void TcpServer::setNonBlocking(int fd) {
+namespace {
+using Clock = std::chrono::steady_clock;
+struct Socket {
+    int fd;
+    explicit Socket(int value) : fd(value) {}
+    ~Socket() { if (fd >= 0) close(fd); }
+    Socket(const Socket&) = delete;
+    Socket& operator=(const Socket&) = delete;
+};
+struct Peer : Socket {
+    explicit Peer(int value) : Socket(value) {}
+    std::vector<uint8_t> input, output;
+    size_t sent = 0;
+    Clock::time_point deadline = Clock::now() + std::chrono::seconds(30);
+};
+void NonBlocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1) return;
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0 || fcntl(fd, F_SETFD, FD_CLOEXEC) < 0)
+        throw std::runtime_error("Cannot configure socket");
+#ifdef SO_NOSIGPIPE
+    int one = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one)) < 0)
+        throw std::runtime_error("Cannot suppress SIGPIPE");
+#endif
 }
-
+}
+TcpServer::TcpServer(int port, std::string address, size_t max_connections)
+    : port_(port), bind_address_(std::move(address)), max_connections_(max_connections) {
+    in_addr parsed{};
+    if (port < 1 || port > 65535 || !max_connections || max_connections > 4096 ||
+        inet_pton(AF_INET, bind_address_.c_str(), &parsed) != 1)
+        throw std::invalid_argument("Invalid server address, port, or connection limit");
+}
 void TcpServer::start() {
-    server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd_ < 0) {
-        throw std::runtime_error("Failed to create socket");
-    }
-
-    int opt = 1;
-    setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
+    if (!handler_) throw std::logic_error("A request handler is required");
+    Socket listener(socket(AF_INET, SOCK_STREAM, 0));
+    if (listener.fd < 0) throw std::runtime_error("Cannot create listener");
+    NonBlocking(listener.fd);
+    int one = 1;
+    if (setsockopt(listener.fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0)
+        throw std::runtime_error("Cannot configure listener");
     sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(port_);
-
-    if (bind(server_fd_, (struct sockaddr*)&address, sizeof(address)) < 0) {
-        throw std::runtime_error("Failed to bind socket");
-    }
-
-    if (listen(server_fd_, SOMAXCONN) < 0) {
-        throw std::runtime_error("Failed to listen");
-    }
-
-    epoll_fd_ = epoll_create1(0);
-    if (epoll_fd_ < 0) {
-        throw std::runtime_error("Failed to create epoll");
-    }
-
-    epoll_event event{};
-    event.events = EPOLLIN;
-    event.data.fd = server_fd_;
-    if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, server_fd_, &event) < 0) {
-        throw std::runtime_error("Failed to add server socket to epoll");
-    }
-
-    running_ = true;
-    std::cout << "Server started on port " << port_ << std::endl;
-    eventLoop();
-}
-
-void TcpServer::stop() {
-    running_ = false;
-    if (server_fd_ != -1) {
-        close(server_fd_);
-        server_fd_ = -1;
-    }
-    if (epoll_fd_ != -1) {
-        close(epoll_fd_);
-        epoll_fd_ = -1;
-    }
-}
-
-void TcpServer::eventLoop() {
-    std::vector<epoll_event> events(MAX_EVENTS);
-
-    while (running_) {
-        int n = epoll_wait(epoll_fd_, events.data(), MAX_EVENTS, 1000);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-
-        for (int i = 0; i < n; ++i) {
-            if (events[i].data.fd == server_fd_) {
-                handleNewConnection();
-            } else {
-                int client_fd = events[i].data.fd;
-                handleClientData(client_fd);
-            }
-        }
-    }
-}
-
-void TcpServer::handleNewConnection() {
-    sockaddr_in client_addr{};
-    socklen_t client_len = sizeof(client_addr);
-    int client_fd = accept(server_fd_, (struct sockaddr*)&client_addr, &client_len);
-
-    if (client_fd < 0) return;
-
-    setNonBlocking(client_fd);
-
-    {
-        std::lock_guard<std::mutex> lock(connections_mutex_);
-        auto conn = std::make_shared<Connection>();
-        conn->fd = client_fd;
-        connections_[client_fd] = conn;
-    }
-
-    epoll_event event{};
-    event.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
-    event.data.fd = client_fd;
-    epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_fd, &event);
-}
-
-void TcpServer::removeConnection(int fd) {
-    std::lock_guard<std::mutex> lock(connections_mutex_);
-    connections_.erase(fd);
-    close(fd);
-}
-
-void TcpServer::handleClientData(int client_fd) {
-    thread_pool_.enqueue([this, client_fd]() {
-        std::shared_ptr<Connection> conn;
-        {
-            std::lock_guard<std::mutex> lock(connections_mutex_);
-            auto it = connections_.find(client_fd);
-            if (it == connections_.end()) return;  // Already removed
-            conn = it->second;
-        }
-
-        std::lock_guard<std::mutex> conn_lock(conn->mutex);
-
-        std::array<char, BUFFER_SIZE> buffer;
-        bool closed = false;
-
-        // Read all available data (Edge Triggered)
-        while (true) {
-            ssize_t count = read(client_fd, buffer.data(), BUFFER_SIZE);
-            if (count < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-                closed = true;
-                break;
-            }
-            if (count == 0) {
-                closed = true;
-                break;
-            }
-            conn->read_buffer.insert(conn->read_buffer.end(), buffer.begin(), buffer.begin() + count);
-        }
-
-        if (closed) {
-            removeConnection(client_fd);
-            return;
-        }
-
-        // Process buffer
-        if (handler_) {
-            while (!conn->read_buffer.empty()) {
-                size_t consumed = 0;
-                auto response = handler_(conn->read_buffer, consumed);
-
-                if (consumed > 0) {
-                    // Remove consumed bytes
-                    conn->read_buffer.erase(conn->read_buffer.begin(), conn->read_buffer.begin() + consumed);
-
-                    if (!response.empty()) {
-                        // Write response
-                        // TODO: Handle partial writes properly
-                        send(client_fd, response.data(), response.size(), 0);
+    address.sin_family = AF_INET; address.sin_port = htons(static_cast<uint16_t>(port_));
+    inet_pton(AF_INET, bind_address_.c_str(), &address.sin_addr);
+    if (bind(listener.fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0 || listen(listener.fd, 128) < 0)
+        throw std::runtime_error("Cannot bind or listen");
+    std::vector<std::unique_ptr<Peer>> peers;
+    auto last_error_log = Clock::now() - std::chrono::seconds(1);
+    std::cout << "Listening on " << bind_address_ << ':' << port_ << std::endl;
+    while (!stopping_) {
+        std::vector<pollfd> events{{listener.fd, POLLIN, 0}};
+        for (const auto& peer : peers)
+            events.push_back({peer->fd, static_cast<short>(peer->output.empty() ? POLLIN : POLLOUT), 0});
+        int count = poll(events.data(), events.size(), 100);
+        if (count < 0) { if (errno == EINTR) continue; throw std::runtime_error("Server poll failed"); }
+        // Reverse traversal allows erasure without invalidating the event-to-peer mapping.
+        for (size_t i = peers.size(); i > 0; --i) {
+            auto& peer = *peers[i - 1];
+            auto revents = events[i].revents;
+            bool dead = Clock::now() >= peer.deadline || (revents & (POLLERR | POLLNVAL));
+            try {
+                if (!dead && peer.output.empty() && (revents & (POLLIN | POLLHUP))) {
+                    std::array<uint8_t, 16384> bytes;
+                    // One bounded read per turn preserves fairness across clients.
+                    auto n = recv(peer.fd, bytes.data(), std::min(bytes.size(), MAX_FRAME_SIZE - peer.input.size()), 0);
+                    if (n > 0) peer.input.insert(peer.input.end(), bytes.begin(), bytes.begin() + n);
+                    else if (n == 0 || (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)) dead = true;
+                }
+                if (!dead && peer.output.empty() && !peer.input.empty()) {
+                    size_t consumed = 0;
+                    auto response = handler_(peer.input, consumed);
+                    if (consumed > peer.input.size() || response.size() > MAX_FRAME_SIZE ||
+                        (!consumed && peer.input.size() == MAX_FRAME_SIZE))
+                        throw std::runtime_error("Invalid handler frame size");
+                    if (consumed) {
+                        peer.input.erase(peer.input.begin(), peer.input.begin() + consumed);
+                        peer.output = std::move(response); peer.sent = 0;
                     }
-                } else {
-                    // Not enough data
+                }
+                if (!dead && !peer.output.empty()) {
+#ifdef MSG_NOSIGNAL
+                    constexpr int flags = MSG_NOSIGNAL;
+#else
+                    constexpr int flags = 0;
+#endif
+                    auto n = send(peer.fd, peer.output.data() + peer.sent, peer.output.size() - peer.sent, flags);
+                    if (n > 0) {
+                        peer.sent += static_cast<size_t>(n);
+                        if (peer.sent == peer.output.size()) {
+                            peer.output.clear(); peer.sent = 0;
+                            peer.deadline = Clock::now() + std::chrono::seconds(30);
+                        }
+                    } else if (n == 0 || (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)) dead = true;
+                }
+            } catch (const std::exception& e) {
+                // No application keys or values are written to logs.
+                if (Clock::now() - last_error_log >= std::chrono::seconds(1)) {
+                    std::cerr << "Request rejected: " << e.what() << '\n';
+                    last_error_log = Clock::now();
+                }
+                dead = true;
+            }
+            if (dead) peers.erase(peers.begin() + static_cast<std::ptrdiff_t>(i - 1));
+        }
+        if (events[0].revents & POLLIN) {
+            // Bound accepts per iteration, including rejection under overload.
+            for (int i = 0; i < 32; ++i) {
+                int fd = accept(listener.fd, nullptr, nullptr);
+                if (fd < 0) {
+                    if (errno == EINTR) continue;
                     break;
                 }
+                auto peer = std::make_unique<Peer>(fd);
+                NonBlocking(fd);
+                if (peers.size() < max_connections_) peers.push_back(std::move(peer));
             }
         }
-
-        // Re-arm EPOLLONESHOT
-        epoll_event event{};
-        event.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
-        event.data.fd = client_fd;
-        epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, client_fd, &event);
-    });
+    }
 }
-
 }  // namespace kvcache

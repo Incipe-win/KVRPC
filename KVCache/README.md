@@ -1,76 +1,49 @@
-# High-Performance C++ Key-Value Cache
+# KVCache
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Language](https://img.shields.io/badge/language-C%2B%2B20-blue.svg)
-![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)
-
-[English](README.md) | [中文](README_zh.md)
-
-A high-performance, thread-safe Key-Value cache system implemented in modern C++.
-Designed for C++ Backend Developer interviews, demonstrating Concurrency, Networking, and System Design.
-
-## Features
-- **LRU Eviction**: Efficient O(1) eviction policy.
-- **Thread Safe**: Concurrent access support with fine-grained locking.
-- **High Performance**: Non-blocking I/O using `epoll` and Reactor pattern.
-- **TTL Support**: Key expiration.
-- **Network**: Custom TCP Protocol / HTTP.
-
-## Performance Benchmark
-Comparison between `LRUCache` (Single Mutex) and `ShardedCache` (16 Shards) under high concurrency (Random Keys).
-
-| Threads | LRUCache (ns) | ShardedCache (ns) | Speedup |
-|---------|---------------|-------------------|---------|
-| 1       | 34.5          | 45.1              | 0.76x   |
-| 4       | 740           | 191               | **3.8x**|
-| 8       | 2344          | 313               | **7.5x**|
-| 16      | 5369          | 635               | **8.4x**|
-
-*Environment: 12 Cores, Linux x86_64*
+KVCache is the C++ cache and TCP server bundled with KVRPC. It provides sharded LRU storage, binary `SET`/`GET`/`DEL`/`STATS` commands, and append-only persistence. This directory is a vendored source snapshot, not a Git submodule.
 
 ## Build
-```bash
-xmake
+
+Use the repository-level build so the server and client share the same protocol definition:
+
+```sh
+cmake -S .. -B ../build/release -DCMAKE_BUILD_TYPE=Release
+cmake --build ../build/release --parallel 4
+ctest --test-dir ../build/release --output-on-failure --parallel 4
 ```
 
-## Run Tests
-```bash
+These commands assume the current directory is `KVCache`. CMake requires no external testing libraries for the maintained suite.
+
+## Run
+
+```sh
+mkdir -p ../build/data
+../build/release/kv_server 8080 ../build/data/appendonly.aof 127.0.0.1
+```
+
+The server runs in the foreground and handles `SIGINT`/`SIGTERM`. Mutation acknowledgements follow successful append and synchronization. Replay rejects invalid or partial records, and another process cannot open the active log for writing.
+
+## Design and limits
+
+The server handles TCP peers with a bounded nonblocking `poll` loop. Handlers execute serially, including persistence. Cache access is mutex-protected, and the total entry capacity is divided across shards. Per-shard LRU eviction can occur before the aggregate capacity is fully used.
+
+The executable defaults to 1,000 cache entries, 16 shards, 128 peers, and a 1 GiB AOF limit. Keys are limited to 64 KiB and values to 1 MiB. This is a single-node cache: replication, TTL, HTTP, authentication, TLS, and log compaction are not implemented.
+
+See the repository [operations guide](../docs/OPERATIONS.md) for memory planning, backup procedures, recovery constraints, and container commands. The [protocol reference](../docs/PROTOCOL.md) specifies exact wire behavior, including the distinction the version-1 protocol cannot make between empty and missing values.
+
+## Historical microbenchmarks
+
+The cache-only tests and benchmark under `tests/` use GoogleTest and Google Benchmark through this directory's Xmake configuration:
+
+```sh
+xmake
 xmake run test_lru_cache
 xmake run test_sharded_cache
-```
-
-## Run Benchmark
-```bash
 xmake run benchmark_cache
 ```
 
-## Run Server
-```bash
-xmake run kv_server 8080
-```
+This optional path may download its test dependencies. Cache microbenchmarks measure in-memory operations, not server or persistence throughput. Earlier benchmark numbers have been removed because they do not establish performance for the current implementation. Record fresh measurements with their hardware, compiler, workload, and revision before making performance claims.
 
-## Observability
-The server supports a `STATS` command to retrieve cache performance metrics (Hits/Misses).
-This allows for monitoring the cache efficiency in real-time.
+## License
 
-## Docker Support
-
-Build the Docker image:
-```bash
-docker build -t kvcache .
-```
-
-Run the container:
-```bash
-docker run -p 8080:8080 kvcache
-```
-
-## CI/CD
-
-The project uses GitHub Actions for Continuous Integration.
-- **Build & Test**: Automatically builds the project and runs unit tests on every push and PR.
-- **Benchmark**: Runs performance benchmarks to ensure no regressions.
-- **Docker**: Verifies the Docker image build.
-
-
-
+The bundled KVCache code retains its [MIT license](LICENSE).

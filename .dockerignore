@@ -1,0 +1,6 @@
+.git
+.cache
+build
+.xmake
+**/*.aof
+**/__pycache__

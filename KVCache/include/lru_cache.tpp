@@ -1,11 +1,13 @@
 #pragma once
 
 #include "lru_cache.h"
+#include <stdexcept>
 
 namespace kvcache {
 
 template <typename Key, typename Value>
 LRUCache<Key, Value>::LRUCache(size_t capacity) : capacity_(capacity) {
+    if (!capacity) throw std::invalid_argument("Cache capacity must be positive");
 }
 
 template <typename Key, typename Value>
@@ -20,16 +22,14 @@ void LRUCache<Key, Value>::put(const Key& key, const Value& value) {
         return;
     }
 
-    // Insert new item
-    if (items_.size() >= capacity_) {
-        // Evict least recently used (back)
-        auto last = items_.back();
-        cache_map_.erase(last.first);
+    // Allocate the new entry before eviction; preserve list/map consistency on failure.
+    items_.emplace_front(key, value);
+    try { cache_map_.emplace(key, items_.begin()); }
+    catch (...) { items_.pop_front(); throw; }
+    if (items_.size() > capacity_) {
+        cache_map_.erase(items_.back().first);
         items_.pop_back();
     }
-
-    items_.emplace_front(key, value);
-    cache_map_[key] = items_.begin();
 }
 
 template <typename Key, typename Value>
@@ -52,6 +52,16 @@ template <typename Key, typename Value>
 bool LRUCache<Key, Value>::exists(const Key& key) {
     std::lock_guard<std::mutex> lock(mutex_);
     return cache_map_.find(key) != cache_map_.end();
+}
+
+template <typename Key, typename Value>
+bool LRUCache<Key, Value>::remove(const Key& key) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = cache_map_.find(key);
+    if (it == cache_map_.end()) return false;
+    items_.erase(it->second);
+    cache_map_.erase(it);
+    return true;
 }
 
 template <typename Key, typename Value>

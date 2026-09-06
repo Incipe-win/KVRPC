@@ -22,6 +22,7 @@ public:
     void put(const Key& key, const Value& value);
     std::optional<Value> get(const Key& key);
     bool exists(const Key& key);
+    bool remove(const Key& key);
     size_t size() const;
 
     // Stats

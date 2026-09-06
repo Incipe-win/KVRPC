@@ -1,82 +1,57 @@
 #pragma once
-
-#include <future>
-#include <memory>
-#include <stdexcept>
-#include <string>
-
 #include "kvrpc/connection_pool.h"
-#include "protocol.h"  // 从你的 KVCache 项目引入的头文件
+#include "kvrpc/executor.h"
+#include "kvrpc/kv_protocol.h"
 
 namespace kvrpc {
-
 class KVCacheClient {
-   private:
-    std::shared_ptr<ConnectionPool> pool_;
-
-   public:
-    KVCacheClient(std::shared_ptr<ConnectionPool> pool) : pool_(std::move(pool)) {}
-
-    // 真正的非阻塞 Set，使用 std::async 后台封装打包协议
+public:
+    explicit KVCacheClient(std::shared_ptr<ConnectionPool> pool, ClientOptions options = {})
+        : pool_(std::move(pool)), options_(options), executor_(options) {
+        if (!pool_) throw Error(ErrorCode::invalid_argument, "A connection pool is required");
+    }
     std::future<bool> Set(const std::string& key, const std::string& value) {
-        return std::async(std::launch::async, [this, key, value]() -> bool {
-            auto conn = pool_->Acquire();
-            if (!conn->IsConnected()) throw std::runtime_error("No available KVCache connection");
-
-            // 使用 KVCache 的协议序列化数据 (encode)
-            std::vector<uint8_t> req_data = kvcache::Message::encode(kvcache::Command::SET, key, value);
-
-            // 传输数据
-            if (!conn->SendAll(reinterpret_cast<const char*>(req_data.data()), req_data.size())) {
-                return false;
-            }
-
-            // 读取返回值包头 (KV_Cache 统一返回 1 字节状态码)
-            // 根据原始实现可扩展这里。假设成功服务器返回 'OK' 以及长度或者类似确认。
-            // 为了简化与 KVCache 的实际读取，这里我们假设我们只关心包发出去了没
-            // *注意*：你需要在 KVCache 服务端处理回包，这里根据 protocol.h
-            // 我们发出去就算成功
-
-            // 下方是一个模拟如果能读取服务器 Header 的操作：
-            /*
-            uint8_t header_buf[kvcache::HEADER_SIZE];
-            conn->RecvAll((char*)header_buf, kvcache::HEADER_SIZE);
-            auto h = kvcache::Message::decodeHeader(header_buf);
-            */
-
-            return true;
+        return Request<bool>(kvcache::Command::SET, key, value);
+    }
+    // Version 1 represents both missing keys and empty values as an empty string.
+    std::future<std::string> Get(const std::string& key) { return Request<std::string>(kvcache::Command::GET, key); }
+    std::future<bool> Delete(const std::string& key) { return Request<bool>(kvcache::Command::DEL, key); }
+    std::future<std::string> Stats() { return Request<std::string>(kvcache::Command::STATS, ""); }
+private:
+    template<class T>
+    std::future<T> Request(kvcache::Command command, const std::string& key, const std::string& value = "") {
+        if (key.size() > kvcache::MAX_KEY_SIZE || value.size() > kvcache::MAX_VALUE_SIZE ||
+            kvcache::HEADER_SIZE + key.size() + value.size() > options_.max_frame_bytes)
+            throw Error(ErrorCode::invalid_argument, "KVCache request exceeds frame limit");
+        auto request = kvcache::Message::encode(command, key, value);
+        return executor_.Submit([pool = pool_, limit = options_.max_frame_bytes, command, key,
+                                 request = std::move(request)]() -> T {
+            auto conn = pool->Acquire();
+            try {
+                auto check = [&](bool ok) {
+                    if (!ok) throw Error(conn->TimedOut() ? ErrorCode::timeout : ErrorCode::transport, "KVCache transport failed");
+                };
+                check(conn->SendAll(reinterpret_cast<const char*>(request.data()), request.size()));
+                uint8_t bytes[kvcache::HEADER_SIZE];
+                check(conn->RecvAll(reinterpret_cast<char*>(bytes), sizeof(bytes)));
+                auto h = kvcache::Message::decodeHeader(bytes);
+                try { kvcache::Message::validate(h); }
+                catch (const std::exception&) { throw Error(ErrorCode::protocol, "Invalid KVCache response header"); }
+                if (h.command != static_cast<uint8_t>(command) || h.key_len != key.size() ||
+                    kvcache::HEADER_SIZE + size_t(h.key_len) + h.value_len > limit ||
+                    ((command == kvcache::Command::SET || command == kvcache::Command::DEL) && h.value_len))
+                    throw Error(ErrorCode::protocol, "Unexpected KVCache response");
+                std::string response_key(h.key_len, '\0'), response_value(h.value_len, '\0');
+                check(conn->RecvAll(response_key.data(), response_key.size()));
+                check(conn->RecvAll(response_value.data(), response_value.size()));
+                if (response_key != key) throw Error(ErrorCode::protocol, "KVCache response key mismatch");
+                if constexpr (std::is_same_v<T, bool>) return true;
+                else return response_value;
+            } catch (...) { conn->Close(); throw; }
         });
     }
-
-    // 同理，包装成一个优雅的 GET 异步调用
-    std::future<std::string> Get(const std::string& key) {
-        return std::async(std::launch::async, [this, key]() -> std::string {
-            auto conn = pool_->Acquire();
-            if (!conn->IsConnected()) return "CONNECTION_ERR";
-
-            std::vector<uint8_t> req_data = kvcache::Message::encode(kvcache::Command::GET, key);
-
-            if (!conn->SendAll(reinterpret_cast<const char*>(req_data.data()), req_data.size())) {
-                return "NETWORK_SEND_ERR";
-            }
-
-            // 读取回复，从 KVCache 返回的数据格式中解析 Header，然后再读取 Value
-            uint8_t header_buf[kvcache::HEADER_SIZE];
-            if (!conn->RecvAll(reinterpret_cast<char*>(header_buf), kvcache::HEADER_SIZE)) {
-                return "NETWORK_RECV_ERR";
-            }
-
-            auto h = kvcache::Message::decodeHeader(header_buf);
-
-            std::string value(h.value_len, '\0');
-            if (h.value_len > 0) {
-                if (!conn->RecvAll(&value[0], h.value_len)) {
-                    return "NETWORK_RECV_ERR";
-                }
-            }
-            return value;
-        });
-    }
+    std::shared_ptr<ConnectionPool> pool_;
+    ClientOptions options_;
+    Executor executor_;
 };
-
 }  // namespace kvrpc
