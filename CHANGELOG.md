@@ -1,5 +1,11 @@
 # Changelog
 
+## CI exception-runtime fix
+
+- Instrument the GCC exception reference-count paths in TSan builds to expose synchronization hidden in the distribution libstdc++ binary.
+- Pin the CI TSan toolchain and add clean exception-transfer and intentional-race detector self-tests; retain all project tests and repeat error-delivery regressions.
+- Preserve upstream runtime sources, checksums, and license notices; normal production and ASan builds are unchanged.
+
 ## Version 2 — Reactor and asynchronous RPC
 
 - Replace runtime poll calls with Linux epoll ET, an acceptor and configurable I/O reactors, eventfd task wakeups, and cancellable deadline timers.

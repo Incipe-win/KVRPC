@@ -6,7 +6,7 @@ Local Linux x86_64 / WSL2 verification on September 6, 2026. GCC 13.3.0 Release,
 | --- | --- |
 | Release build and CTest | 12/12 passed |
 | Clang ASan + UBSan | 12/12 passed |
-| Clang TSan | Initial full runs passed; repeated client-error tests expose the standard-library exception lifetime report described below. Not a clean TSan certification |
+| Clang TSan | Fixed on September 7: 14/14 passed, including runtime regression and positive race-detection control; four exception-related tests each passed 20 consecutive runs |
 | Independent installed CMake consumer | Build, link, execution passed |
 | All public headers independently, warnings as errors | Passed |
 | Docker build and process/volume test | Passed: non-root UID, real TCP, persisted data after restart, SIGTERM |
@@ -29,7 +29,11 @@ TSAN_OPTIONS=symbolize=0 /tmp/future_exception_tsan
 
 The [minimal program](../tests/diagnostics/future_exception_tsan.cpp) uses only standard promise/future/thread and an integer exception. The [captured report](../tests/diagnostics/future_exception_tsan.log) has the same `libstdc++ exception_ptr::_M_release` free-versus-read pattern. GCC documents limitations when runtime synchronization is outside instrumentation: [maintainer discussion](https://gcc.gnu.org/pipermail/gcc-bugs/2021-December/771131.html).
 
-On this host the online symbolizer can also hang while reporting it. `symbolize=0` obtains the raw report without suppressing race checking; addresses were resolved locally with addr2line/GDB. No TSan suppressions or ignored tests were added. A clean repeated TSan run requires a compatible instrumented C++ runtime; it is still an outstanding environment verification, not a claim that every possible project race is excluded.
+The CI fix rebuilds the affected GCC 14.2 exception reference-count operations with TSan, using unmodified upstream source and ELF symbol interposition. This exposes their real atomic release/acquire operations; it does not suppress reports. The adapter is enabled only by `KVRPC_TSAN` on Linux x86_64 with libstdc++ 13/14 headers. CI pins Clang 18 and GCC 14; local verification used Clang 22.1.8. See [runtime provenance and scope](../third_party/gcc-14.2.0/README.md).
+
+The full TSan suite now includes `tsan_exception_runtime` (the independent standard-library regression linked against the instrumented runtime) and `tsan_detector` (an intentionally racy process must exit with a TSan diagnostic). All 14 tests passed locally. The runtime regression plus rpc_client, rpc_server, and kvcache_client each passed 20 consecutive runs. Existing Release/ASan coverage remains enabled.
+
+The historical raw log is retained for comparison. `symbolize=0` is used only by the positive control to avoid external symbolizer dependencies while checking its deliberate diagnostic; normal project tests retain regular reporting.
 
 ## Limits
 

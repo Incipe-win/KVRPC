@@ -14,6 +14,8 @@ cmake --build build/tsan --parallel 4
 ctest --test-dir build/tsan --output-on-failure --parallel 4
 ```
 
+TSan additionally requires `systemtap-sdt-dev` and libstdc++ 13/14 headers on Linux x86_64. Its CMake build compiles the vendored GCC exception runtime with instrumentation and runs both a clean exception-transfer regression and a positive race-detection control. CI pins Clang 18/GCC 14; no TSan suppressions are enabled.
+
 Run networking tests with local socket permissions. Register callbacks before starting; keep all socket state on its owning EventLoop. Changes to ET budgets must retain explicit continuations. Changes to asynchronous execution must preserve bounded admission, ownership, and request correlation. Changes to storage must preserve fsync-before-ack and crash-safe replacement.
 
 Use CMake installation plus tests/install to validate public headers and transitive Protobuf linkage. CI covers release/debug/sanitizers and Docker. Xmake is an alternative; do not claim it was tested unless executed.

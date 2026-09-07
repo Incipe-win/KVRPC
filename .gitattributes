@@ -1,0 +1,3 @@
+# Preserve vendored GCC sources byte-for-byte, including upstream whitespace.
+third_party/gcc-14.2.0/libsupc++/* -whitespace
+third_party/gcc-14.2.0/COPYING* -whitespace

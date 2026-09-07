@@ -39,10 +39,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
-      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DKVRPC_TSAN=ON -DCMAKE_CXX_COMPILER=clang++
+      - run: sudo apt-get update && sudo apt-get install -y clang-18 g++-14 protobuf-compiler libprotobuf-dev systemtap-sdt-dev
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DKVRPC_TSAN=ON -DCMAKE_CXX_COMPILER=clang++-18
       - run: cmake --build build --parallel 4
       - run: ctest --test-dir build --output-on-failure --parallel 2
+      - name: Repeat exception delivery regressions
+        run: ctest --test-dir build -R '^(tsan_exception_runtime|rpc_client|rpc_server|kvcache_client)$' --repeat until-fail:10 --output-on-failure --parallel 2
   container:
     runs-on: ubuntu-24.04
     steps:
