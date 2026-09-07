@@ -1,0 +1,114 @@
+{
+  "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "binary_sha256": "d87af5573ea4c487b992b37e13043f7c3ffa67ce64c8b16a9ce6a3aa826f57bb",
+  "command": {
+    "build": "build/review",
+    "seconds": 2,
+    "rate": 5000,
+    "connections": 16,
+    "workers": 4,
+    "max_pending": 256,
+    "io": [
+      1,
+      2,
+      4
+    ],
+    "idle": [
+      0,
+      1000
+    ],
+    "output": "benchmarks/network-results.json"
+  },
+  "trials": [
+    {
+      "io_threads": 1,
+      "idle": 0,
+      "offered": 10000,
+      "completed": 10000,
+      "errors": 0,
+      "timeouts": 0,
+      "dropped": 0,
+      "elapsed_seconds": 2.001375449995976,
+      "ops_per_second": 4996.563738213191,
+      "p50_us": 536.9150021579117,
+      "p99_us": 1026.2760042678565,
+      "server_cpu_seconds": 0.67,
+      "server_rss_kib": 6160
+    },
+    {
+      "io_threads": 1,
+      "idle": 1000,
+      "offered": 10000,
+      "completed": 10000,
+      "errors": 0,
+      "timeouts": 0,
+      "dropped": 0,
+      "elapsed_seconds": 2.001558827003464,
+      "ops_per_second": 4996.105967552805,
+      "p50_us": 548.3800050569698,
+      "p99_us": 1032.86599915009,
+      "server_cpu_seconds": 0.66,
+      "server_rss_kib": 7196
+    },
+    {
+      "io_threads": 2,
+      "idle": 0,
+      "offered": 10000,
+      "completed": 10000,
+      "errors": 0,
+      "timeouts": 0,
+      "dropped": 0,
+      "elapsed_seconds": 2.0014120749983704,
+      "ops_per_second": 4996.472303190308,
+      "p50_us": 470.3010054072365,
+      "p99_us": 875.6630122661591,
+      "server_cpu_seconds": 0.85,
+      "server_rss_kib": 6172
+    },
+    {
+      "io_threads": 2,
+      "idle": 1000,
+      "offered": 10000,
+      "completed": 10000,
+      "errors": 0,
+      "timeouts": 0,
+      "dropped": 0,
+      "elapsed_seconds": 2.0015403509896714,
+      "ops_per_second": 4996.152086094818,
+      "p50_us": 540.319990250282,
+      "p99_us": 1020.2869889326394,
+      "server_cpu_seconds": 0.88,
+      "server_rss_kib": 7220
+    },
+    {
+      "io_threads": 4,
+      "idle": 0,
+      "offered": 10000,
+      "completed": 10000,
+      "errors": 0,
+      "timeouts": 0,
+      "dropped": 0,
+      "elapsed_seconds": 2.0012748669978464,
+      "ops_per_second": 4996.814862818522,
+      "p50_us": 459.25700396765023,
+      "p99_us": 843.0379966739565,
+      "server_cpu_seconds": 0.88,
+      "server_rss_kib": 6236
+    },
+    {
+      "io_threads": 4,
+      "idle": 1000,
+      "offered": 10000,
+      "completed": 10000,
+      "errors": 0,
+      "timeouts": 0,
+      "dropped": 0,
+      "elapsed_seconds": 2.0014725319924764,
+      "ops_per_second": 4996.32137846276,
+      "p50_us": 541.7439970187843,
+      "p99_us": 1006.9929849123582,
+      "server_cpu_seconds": 0.92,
+      "server_rss_kib": 7344
+    }
+  ]
+}

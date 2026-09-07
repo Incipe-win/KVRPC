@@ -1,11 +1,13 @@
 #pragma once
-#include "kvrpc/error.h"
-#include "kvrpc/tcp_connection.h"
 #include <arpa/inet.h>
+
 #include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <vector>
+
+#include "kvrpc/error.h"
+#include "kvrpc/tcp_connection.h"
 
 namespace kvrpc {
 class ConnectionPool {
@@ -15,10 +17,16 @@ class ConnectionPool {
         std::vector<std::unique_ptr<TcpConnection>> free;
         bool closed = false;
     };
-public:
-    ConnectionPool(const std::string& ip, uint16_t port, size_t size,
-                   TransportOptions options = {}, std::chrono::milliseconds acquire_timeout = std::chrono::seconds(5))
-        : state_(std::make_shared<State>()), ip_(ip), port_(port), acquire_timeout_(acquire_timeout) {
+
+   public:
+    ConnectionPool(const std::string& ip, uint16_t port, size_t size, TransportOptions options = {},
+                   std::chrono::milliseconds acquire_timeout = std::chrono::seconds(5))
+        : state_(std::make_shared<State>()),
+          ip_(ip),
+          port_(port),
+          acquire_timeout_(acquire_timeout),
+          slots_(size),
+          options_(options) {
         in_addr address{};
         if (!size || size > 4096 || !port || inet_pton(AF_INET, ip.c_str(), &address) != 1 ||
             acquire_timeout.count() <= 0 || acquire_timeout > std::chrono::hours(24))
@@ -26,6 +34,11 @@ public:
         state_->free.reserve(size);
         for (size_t i = 0; i < size; ++i) state_->free.emplace_back(std::make_unique<TcpConnection>(options));
     }
+    ClientEndpoint Endpoint() const { return {ip_, port_, slots_, options_}; }
+    const std::string& Address() const { return ip_; }
+    uint16_t Port() const { return port_; }
+    size_t Slots() const { return slots_; }
+    TransportOptions Options() const { return options_; }
     ~ConnectionPool() { Close(); }
     ConnectionPool(const ConnectionPool&) = delete;
     ConnectionPool& operator=(const ConnectionPool&) = delete;
@@ -59,10 +72,13 @@ public:
         conn->BeginRequest();
         return conn;
     }
-private:
+
+   private:
     std::shared_ptr<State> state_;
     std::string ip_;
     uint16_t port_;
     std::chrono::milliseconds acquire_timeout_;
+    size_t slots_;
+    TransportOptions options_;
 };
 }  // namespace kvrpc

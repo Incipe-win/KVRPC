@@ -1,101 +1,41 @@
-# Protocol Reference
+# Wire protocols
 
-KVRPC supports two independent TCP wire formats. TCP packet boundaries have no meaning in either format; receivers must handle fragmented headers and bodies as well as multiple frames in one read.
+## RPC version 2
 
-## Generic RPC
+Each message has a 16-byte header:
 
-| Field | Size | Encoding |
+| Offset | Size | Meaning |
 | --- | --- | --- |
-| Payload length | 4 bytes | Unsigned, little endian |
-| Payload | Declared length | Serialized values |
+| 0 | 4 | ASCII `KVR2` |
+| 4 | 4 | Unsigned Protobuf payload length, network byte order |
+| 8 | 8 | Nonzero request ID, network byte order |
+| 16 | length | `kvrpc.wire.Envelope` |
 
-A request payload begins with a serialized method-name string, followed by the method's arguments in declaration order. A successful response payload contains exactly one value of the requested return type. A `void` result requires an empty response payload. Extra bytes after a decoded result are a protocol error.
+See [the schema](../proto/rpc.proto). REQUEST carries method and typed arguments; RESPONSE carries result or status/error. Status 0 means success, 1 unknown method, 2 invalid arguments, 3 callback failure. Callback exception details are not exposed remotely. Unknown Protobuf fields support compatible schema extension; field numbers must not be reused. The outer length is bounded before body buffering.
 
-### Value encoding
+Values distinguish signed integer, unsigned integer, double, bool, binary string, and serialized Protobuf message. Integer conversions check the destination range. The application registers the expected argument/result types. Embedded Protobuf message types are defined by the method contract, not negotiated dynamically.
 
-| Type | Encoding |
-| --- | --- |
-| Fixed-width integer | Little-endian bytes; signed values use two's complement |
-| `float`, `double` | IEEE 754 bits in little-endian order |
-| `bool` | One byte: `0` or `1` |
-| `std::string` | 4-byte little-endian byte length, then raw bytes |
-| C string argument | Converted to an owned string before dispatch; null pointers are rejected |
+Responses may arrive out of order. The ID is connection-scoped correlation, not an idempotency token or a retry guarantee. Generic version-1 framing is intentionally unsupported in version 2.
 
-The default payload limit is 2 MiB in each direction. The standalone serializer defaults to a 64 MiB serialization limit. Frame lengths are checked before response allocation. Embedded string lengths are checked against the remaining payload.
+## KV compatibility protocol
 
-Use `int32_t`, `uint32_t`, `int64_t`, and other fixed-width types for portable interfaces. Platform-dependent types such as `long`, pointers, aggregates, and `long double` are not portable RPC signatures. The protocol has no method schema negotiation. The high bit of the response length is an error
-flag; the low 31 bits contain its payload length. An error payload is a serialized `uint32_t` status
-followed by a string: 1 = method not found, 2 = invalid arguments, 3 = handler failure. Exception
-internals are not sent. `RpcClient` validates this envelope and throws `RemoteError`; the fully consumed
-connection remains reusable. Success framing is unchanged. Older clients reject error frames as
-oversized; they must upgrade to inspect remote status. Requests must not set the high bit.
+The existing 12-byte network-order header remains: magic `0xCAFE` (2), version `1` (1), command (1), key length (4), value length (4), followed by key and value bytes.
 
-The little-endian encoding preserves the original prototype's wire bytes on ordinary little-endian Linux/macOS systems. Original native-endian peers on big-endian systems need migration.
+| Command | Value in request | Value in response |
+| --- | --- | --- |
+| SET = 1 | Raw value | Empty acknowledgement |
+| GET = 2 | Empty | Raw value; missing and empty remain ambiguous |
+| DEL = 3 | Empty | Empty acknowledgement |
+| STATS = 4 | Empty; key must be empty | Text counters |
+| LOOKUP = 5 | Empty | Protobuf `CacheValue` with found/value |
+| SET_TTL = 6 | Protobuf `CacheValue` with value/ttl_ms | Empty acknowledgement |
 
-## KVCache version 1
+The key limit is 64 KiB and application value limit is 1 MiB. Wire value allowance includes 64 bytes for the TTL/lookup envelope. TTL must be positive and no greater than ten 365-day years. Clients use `Lookup` for an optional result. Requests on one KV connection execute sequentially; use separate connections for concurrency.
 
-All multibyte header integers use network byte order, which is big endian. The header is always 12 bytes; its layout does not depend on C++ structure packing.
+Malformed requests, storage errors, and overload close the relevant connection. A disconnected write may have committed; never infer failure-to-apply from loss of its acknowledgement.
 
-| Offset | Field | Size | Required value |
-| --- | --- | --- | --- |
-| 0 | Magic | 2 bytes | `0xCAFE` |
-| 2 | Version | 1 byte | `1` |
-| 3 | Command | 1 byte | `1`–`4` |
-| 4 | Key length | 4 bytes | At most 65,536 bytes |
-| 8 | Value length | 4 bytes | At most 1,048,576 bytes |
-| 12 | Key | Key length | Raw bytes |
-| 12 + key length | Value | Value length | Raw bytes |
+## AOF version 2
 
-The maximum complete frame size is 1,114,124 bytes. Keys and values may contain NUL bytes. Empty keys are accepted. Lengths count bytes, not characters.
+Every new record starts with `AOF2` (4), payload length (4, network order), and IEEE CRC32 (4, network order), followed by an encoded KV mutation. SET_TTL records carry value/absolute expires_unix_ms, not relative ttl_ms. Only SET, SET_TTL, and DEL are valid log operations.
 
-### Commands and responses
-
-| Command | Code | Request | Response value |
-| --- | --- | --- | --- |
-| `SET` | 1 | Key and value | Empty acknowledgement |
-| `GET` | 2 | Key; empty value | Stored bytes, or empty on a miss |
-| `DEL` | 3 | Key; empty value | Empty acknowledgement, including an absent key |
-| `STATS` | 4 | Empty key and value | UTF-8 text: hit/miss and AOF counters |
-
-STATS returns `Hits: N, Misses: N, AOF records: N, AOF syncs: N, AOF bytes: N`. AOF counters count successfully synchronized mutations since process start, excluding replay and the startup directory fsync.
-
-Every response repeats the command and key of its request. The client reads the complete key and value, verifies the echoed key, and then resolves the future. A sent `SET` request alone is not success.
-
-For example, `SET k v` is:
-
-```text
-CA FE 01 01 00 00 00 01 00 00 00 01 6B 76
-```
-
-The corresponding acknowledgement is:
-
-```text
-CA FE 01 01 00 00 00 01 00 00 00 00 6B
-```
-
-Version 1 has no explicit status code. A missing key and a stored empty value are indistinguishable through `GET`. `DEL` acknowledges completion rather than reporting whether a key existed. Invalid frames and storage failures cause connection closure. Clients treat them as failures and do not infer success from a successful send.
-
-### Compatibility
-
-Valid original KVCache version-1 frames remain compatible. The implementation now rejects invalid magic/version values, unknown commands, excessive lengths, illegal command bodies, mismatched response keys, and unexpected mutation payloads. The bundled server now implements deletion.
-
-Generic RPC framing must never be sent to the KVCache port. Use a separate `RpcServer` listener for generic `RpcClient::Call` dispatch.
-
-## Failure reporting
-
-`kvrpc::Error` derives from `std::runtime_error` and exposes `code()`:
-
-| Code | Meaning |
-| --- | --- |
-| `invalid_argument` | Invalid configuration or request limits |
-| `overloaded` | No space in the client waiting queue |
-| `closed` | Client or connection pool no longer accepts work |
-| `timeout` | Pool acquisition, connect, or request deadline expired |
-| `connection` | TCP connection could not be established |
-| `transport` | Established connection failed during a transfer |
-| `protocol` | Peer response failed framing or payload validation |
-| `remote` | Complete RPC error envelope; `RemoteError::status()` identifies the remote failure |
-
-Allocation failures and standalone serializer errors retain their standard C++ exception types. Validation before dispatch can throw synchronously; execution and overload errors are observed through `future::get()`.
-
-A transport error after sending a mutation does not reveal whether the mutation committed. Reconcile state before retrying a non-idempotent application workflow. The library never retries requests automatically.
+Replay supports legacy bare KV records and new checksummed records, allowing append migration. Rewriting produces only version-2 records. Old binaries cannot read upgraded files. A truncated record or CRC mismatch rejects startup rather than silently discarding history.

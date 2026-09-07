@@ -1,15 +1,22 @@
 #include <kvrpc/rpc_server.h>
+#include <pthread.h>
+
 #include <csignal>
 #include <iostream>
-#include <pthread.h>
 #include <thread>
 
 int main(int argc, char** argv) {
     try {
         sigset_t signals;
-        sigemptyset(&signals); sigaddset(&signals, SIGINT); sigaddset(&signals, SIGTERM);
+        sigemptyset(&signals);
+        sigaddset(&signals, SIGINT);
+        sigaddset(&signals, SIGTERM);
         if (pthread_sigmask(SIG_BLOCK, &signals, nullptr) != 0) throw std::runtime_error("Cannot block signals");
         kvrpc::RpcServer server(argc > 1 ? std::stoi(argv[1]) : 8081);
+        kvrpc::ServerOptions options;
+        if (argc > 2) options.io_threads = std::stoul(argv[2]);
+        if (argc > 3) options.workers = std::stoul(argv[3]);
+        server.Configure(options);
         server.Register<int64_t, int32_t, int32_t>("add", [](int32_t a, int32_t b) { return int64_t(a) + b; });
         server.Register<std::string, std::string>("echo", [](std::string value) { return value; });
         server.Register<void>("ping", [] {});
@@ -17,12 +24,16 @@ int main(int argc, char** argv) {
             int signal = 0;
             if (sigwait(&signals, &signal) == 0) server.Stop();
         });
-        try { server.Start(); }
-        catch (...) {
+        try {
+            server.Start();
+        } catch (...) {
             pthread_kill(shutdown.native_handle(), SIGTERM);
             shutdown.join();
             throw;
         }
         shutdown.join();
-    } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
+    }
 }

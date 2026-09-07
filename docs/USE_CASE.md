@@ -34,10 +34,10 @@ tests execute this application against their own real KV server.
 The TSV is an immutable synthetic snapshot, not a simulated production database metric. Changing
 its contents requires changing the revision argument or invalidating the corresponding keys. A cache
 lookup/write failure falls back to the source; an invalidation failure remains visible to the caller.
-Empty profiles are disallowed in this example because KV version 1 cannot distinguish an empty value
+Empty profiles are disallowed in this example because this example uses the compatibility Get API, which does not distinguish an empty value
 from a miss. Missing source records are reported as remote handler failures.
 
 This is a small service integration example, not a production profile API. Its RPC handlers execute
-serially, and it does not claim TTL, distributed cache coherence, stampede prevention, authentication,
+concurrently through the RPC worker pool. The cache supports TTL; this example does not claim distributed cache coherence, stampede prevention, authentication,
 or source-database transactions. The value demonstrated here is the end-to-end data path, an explicit
 source of truth, invalidation, and a measurable reduction in source reads.

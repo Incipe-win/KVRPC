@@ -1,71 +1,62 @@
 #pragma once
-#include "kvrpc/connection_pool.h"
-#include "kvrpc/executor.h"
-#include "kvrpc/serializer.h"
-#include <array>
+#include <atomic>
 
+#include "kvrpc/async_transport.h"
+#include "kvrpc/connection_pool.h"
+#include "kvrpc/rpc_protocol.h"
 namespace kvrpc {
 class RpcClient {
-public:
+   public:
+    explicit RpcClient(ClientEndpoint endpoint, ClientOptions options = {}) : options_(options) {
+        transport_ = std::make_unique<AsyncTransport>(endpoint.address, endpoint.port, endpoint.connections,
+                                                      endpoint.timeouts, options, RpcFrameSize, RpcId);
+    }
     explicit RpcClient(std::shared_ptr<ConnectionPool> pool, ClientOptions options = {})
-        : pool_(std::move(pool)), options_(options), executor_(options) {
-        if (!pool_) throw Error(ErrorCode::invalid_argument, "A connection pool is required");
-    }
-    template<class RetType, class... Args>
-    std::future<RetType> Call(const std::string& name, Args... args) {
-        // Serialize now so pointer arguments cannot dangle while waiting in the queue.
-        Serializer request(options_.max_frame_bytes);
-        try { request.Serialize(name, args...); }
-        catch (const std::length_error&) { throw Error(ErrorCode::invalid_argument, "RPC request exceeds frame limit"); }
-        if (request.GetBuffer().size() > options_.max_frame_bytes)
-            throw Error(ErrorCode::invalid_argument, "RPC request exceeds frame limit");
-        return executor_.Submit([pool = pool_, limit = options_.max_frame_bytes,
-                                 payload = request.GetBuffer()]() -> RetType {
-            auto conn = pool->Acquire();
+        : RpcClient(Endpoint(pool), options) {}
+    template <class Ret, class... Args>
+    std::future<Ret> Call(const std::string& name, const Args&... args) {
+        wire::Envelope request;
+        request.set_method(name);
+        (ToValue(*request.add_arguments(), args), ...);
+        auto id = next_.fetch_add(1);
+        auto bytes = RpcEncode(id, request, options_.max_frame_bytes);
+        auto promise = std::make_shared<std::promise<Ret>>();
+        auto result = promise->get_future();
+        transport_->Submit(id, std::move(bytes), [promise](auto bytes, std::exception_ptr error) -> bool {
             try {
-                Serializer prefix;
-                prefix.Serialize(static_cast<uint32_t>(payload.size()));
-                auto check = [&](bool ok) {
-                    if (!ok) throw Error(conn->TimedOut() ? ErrorCode::timeout : ErrorCode::transport, "RPC transport failed");
-                };
-                check(conn->SendAll(prefix.GetBuffer().data(), 4));
-                check(conn->SendAll(payload.data(), payload.size()));
-                std::vector<char> header(4);
-                check(conn->RecvAll(header.data(), header.size()));
-                Serializer decoded(std::move(header));
-                uint32_t size = 0; decoded.Deserialize(size);
-                const bool remote_error = (size & 0x80000000u) != 0;
-                size &= 0x7fffffffu;
-                if (size > limit) throw Error(ErrorCode::protocol, "RPC response exceeds frame limit");
-                std::vector<char> response(size);
-                check(conn->RecvAll(response.data(), response.size()));
-                Serializer result(std::move(response));
-                if (remote_error) {
-                    uint32_t status = 0;
-                    std::string message;
-                    try { result.Deserialize(status, message); }
-                    catch (const std::exception&) { throw Error(ErrorCode::protocol, "Invalid remote error envelope"); }
-                    if (status < 1 || status > 3 || result.Remaining())
-                        throw Error(ErrorCode::protocol, "Invalid remote error status");
-                    throw RemoteError(status, message);
+                if (error) {
+                    promise->set_exception(std::move(error));
+                    return true;
                 }
-                if constexpr (std::is_void_v<RetType>) {
-                    if (result.Remaining()) throw Error(ErrorCode::protocol, "Unexpected void response payload");
-                    return;
-                } else {
-                    RetType value{};
-                    try { result.Deserialize(value); }
-                    catch (const std::exception&) { throw Error(ErrorCode::protocol, "Invalid RPC response value"); }
-                    if (result.Remaining()) throw Error(ErrorCode::protocol, "Trailing RPC response bytes");
-                    return value;
-                }
-            } catch (const RemoteError&) { throw; }
-            catch (...) { conn->Close(); throw; }
+                auto response = RpcDecode(bytes);
+                if (response.type() != wire::Envelope::RESPONSE || response.status() > 4)
+                    throw Error(ErrorCode::protocol, "Invalid RPC response type or status");
+                if (response.status()) throw RemoteError(response.status(), response.error());
+                if constexpr (std::is_void_v<Ret>) {
+                    if (response.has_result()) throw Error(ErrorCode::protocol, "Unexpected result");
+                    promise->set_value();
+                } else
+                    promise->set_value(FromValue<Ret>(response.result()));
+                return true;
+            } catch (const Error& failure) {
+                bool valid = failure.code() != ErrorCode::protocol;
+                promise->set_exception(std::current_exception());
+                return valid;
+            } catch (...) {
+                promise->set_exception(std::current_exception());
+                return false;
+            }
         });
+        return result;
     }
-private:
-    std::shared_ptr<ConnectionPool> pool_;
+
+   private:
+    static ClientEndpoint Endpoint(const std::shared_ptr<ConnectionPool>& pool) {
+        if (!pool) throw Error(ErrorCode::invalid_argument, "Connection endpoint required");
+        return pool->Endpoint();
+    }
     ClientOptions options_;
-    Executor executor_;
+    std::atomic<uint64_t> next_{1};
+    std::unique_ptr<AsyncTransport> transport_;
 };
 }  // namespace kvrpc

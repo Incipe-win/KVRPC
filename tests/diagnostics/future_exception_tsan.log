@@ -1,0 +1,24 @@
+==================
+WARNING: ThreadSanitizer: data race (pid=169285)
+  Write of size 8 at 0x7224000078e0 by thread T600:
+    #0 <null> <null> (kvrpc-future-tsan+0x6507e) (BuildId: 3100c0d79af823b0397465cd1520d98ba3c8b8ac)
+    #1 <null> <null> (libstdc++.so.6+0xbaee4) (BuildId: 753c6c8608b61d4e67be8f0c890e03e0aa046b8b)
+    #2 <null> <null> (kvrpc-future-tsan+0xee3de) (BuildId: 3100c0d79af823b0397465cd1520d98ba3c8b8ac)
+    #3 <null> <null> (kvrpc-future-tsan+0xee2fa) (BuildId: 3100c0d79af823b0397465cd1520d98ba3c8b8ac)
+    #4 <null> <null> (kvrpc-future-tsan+0xee185) (BuildId: 3100c0d79af823b0397465cd1520d98ba3c8b8ac)
+    #5 <null> <null> (kvrpc-future-tsan+0xee092) (BuildId: 3100c0d79af823b0397465cd1520d98ba3c8b8ac)
+    #6 <null> <null> (kvrpc-future-tsan+0xedbde) (BuildId: 3100c0d79af823b0397465cd1520d98ba3c8b8ac)
+    #7 <null> <null> (libstdc++.so.6+0xecdbc) (BuildId: 753c6c8608b61d4e67be8f0c890e03e0aa046b8b)
+
+  Previous read of size 4 at 0x7224000078e0 by main thread:
+    #0 <null> <null> (kvrpc-future-tsan+0xeda71) (BuildId: 3100c0d79af823b0397465cd1520d98ba3c8b8ac)
+    #1 <null> <null> (libc.so.6+0x2a1c9) (BuildId: 328820b908de8ea1ef79afa8995e302e819163d7)
+
+  Thread T600 (tid=169905, running) created by main thread at:
+    #0 <null> <null> (kvrpc-future-tsan+0x668ee) (BuildId: 3100c0d79af823b0397465cd1520d98ba3c8b8ac)
+    #1 <null> <null> (libstdc++.so.6+0xeceb0) (BuildId: 753c6c8608b61d4e67be8f0c890e03e0aa046b8b)
+    #2 <null> <null> (libc.so.6+0x2a1c9) (BuildId: 328820b908de8ea1ef79afa8995e302e819163d7)
+
+SUMMARY: ThreadSanitizer: data race (/tmp/kvrpc-future-tsan+0x6507e) (BuildId: 3100c0d79af823b0397465cd1520d98ba3c8b8ac)
+==================
+ThreadSanitizer: reported 1 warnings

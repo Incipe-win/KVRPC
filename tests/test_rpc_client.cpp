@@ -1,42 +1,53 @@
 #include "kvrpc/rpc_client.h"
 #include "test_support.h"
-
-std::vector<char> Request(int fd) {
-    std::vector<char> header(4); Read(fd, header.data(), 4);
-    kvrpc::Serializer s(std::move(header)); uint32_t size; s.Deserialize(size); CHECK(size < 1024);
-    std::vector<char> body(size); Read(fd, body.data(), body.size()); return body;
+using namespace kvrpc;
+std::pair<uint64_t, wire::Envelope> Request(int fd) {
+    std::vector<uint8_t> bytes(RPC_HEADER);
+    Read(fd, reinterpret_cast<char*>(bytes.data()), bytes.size());
+    auto size = RpcFrameSize(bytes.data(), bytes.size());
+    CHECK(size < 4096);
+    bytes.resize(size);
+    Read(fd, reinterpret_cast<char*>(bytes.data() + RPC_HEADER), size - RPC_HEADER);
+    return {RpcId(bytes), RpcDecode(bytes)};
 }
-void Response(int fd, const std::vector<char>& body) {
-    kvrpc::Serializer s; s.Serialize(static_cast<uint32_t>(body.size()));
-    Write(fd, s.GetBuffer().data(), 4, true); Write(fd, body.data(), body.size(), true);
+void Response(int fd, uint64_t id, wire::Envelope result) {
+    result.set_type(wire::Envelope::RESPONSE);
+    auto bytes = RpcEncode(id, result, 4096);
+    Write(fd, reinterpret_cast<char*>(bytes.data()), bytes.size(), true);
 }
 int main() {
     TestServer server([](int fd) {
         for (int i = 0; i < 3; ++i) {
-            kvrpc::Serializer s(Request(fd)); std::string method, text;
-            s.Deserialize(method, text); CHECK(method == "echo" && text == "hello");
-            kvrpc::Serializer result; result.Serialize(text); Response(fd, result.GetBuffer());
+            auto [id, request] = Request(fd);
+            CHECK(request.method() == "echo");
+            wire::Envelope response;
+            *response.mutable_result() = request.arguments(0);
+            Response(fd, id, response);
         }
     });
-    auto pool = std::make_shared<kvrpc::ConnectionPool>("127.0.0.1", server.port(), 1);
     std::future<std::string> final;
     {
-        kvrpc::RpcClient client(pool);
+        RpcClient client(std::make_shared<ConnectionPool>("127.0.0.1", server.port(), 1));
         CHECK(client.Call<std::string>("echo", "hello").get() == "hello");
         CHECK(client.Call<std::string>("echo", std::string("hello")).get() == "hello");
         final = client.Call<std::string>("echo", "hello");
     }
-    CHECK(final.get() == "hello"); server.Finish();
-    TestServer oversized([](int fd) {
-        Request(fd); const char header[] = {char(255), char(255), char(255), char(255)}; Write(fd, header, 4);
+    CHECK(final.get() == "hello");
+    server.Finish();
+    TestServer wrong_id([](int fd) {
+        auto [id, request] = Request(fd);
+        Response(fd, id + 1, {});
     });
-    auto bad_pool = std::make_shared<kvrpc::ConnectionPool>("127.0.0.1", oversized.port(), 1);
-    kvrpc::RpcClient bad(bad_pool);
-    ErrorIs(kvrpc::ErrorCode::protocol, [&] { bad.Call<int>("bad").get(); }); oversized.Finish();
-    TestServer trailing([](int fd) { Request(fd); kvrpc::Serializer s; s.Serialize(int32_t(1), int32_t(2)); Response(fd, s.GetBuffer()); });
-    kvrpc::RpcClient strict(std::make_shared<kvrpc::ConnectionPool>("127.0.0.1", trailing.port(), 1));
-    ErrorIs(kvrpc::ErrorCode::protocol, [&] { strict.Call<int32_t>("bad").get(); }); trailing.Finish();
-    TestServer empty([](int fd) { Request(fd); Response(fd, {}); });
-    kvrpc::RpcClient void_client(std::make_shared<kvrpc::ConnectionPool>("127.0.0.1", empty.port(), 1));
-    void_client.Call<void>("noop").get(); empty.Finish();
+    RpcClient bad(std::make_shared<ConnectionPool>("127.0.0.1", wrong_id.port(), 1));
+    ErrorIs(ErrorCode::protocol, [&] { bad.Call<void>("bad").get(); });
+    wrong_id.Finish();
+    TestServer wrong_type([](int fd) {
+        auto [id, request] = Request(fd);
+        wire::Envelope result;
+        result.mutable_result()->set_string_value("x");
+        Response(fd, id, result);
+    });
+    RpcClient strict(std::make_shared<ConnectionPool>("127.0.0.1", wrong_type.port(), 1));
+    ErrorIs(ErrorCode::protocol, [&] { strict.Call<int32_t>("bad").get(); });
+    wrong_type.Finish();
 }

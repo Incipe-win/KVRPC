@@ -1,103 +1,44 @@
 # Operations
 
-## Deployment boundary
-
-Run the bundled server as a single-node cache within a controlled network. Native TLS, authentication, authorization, replication, and failover are not implemented. The default listener is `127.0.0.1`. For remote clients, provide an authenticated network boundary and restrict access to the intended application identities.
-
-The process accepts:
-
-```text
-kv_server [port=8080] [aof=appendonly.aof] [bind=127.0.0.1] [sync=group|always]
-```
-
-Use `kv_server --help` for the same usage information. Ports must be in `1`–`65535`; addresses must be numeric IPv4. Hostname resolution and IPv6 are not implemented.
-
-## Resource planning
-
-| Resource | Bundled executable default |
-| --- | --- |
-| Cache capacity | 1,000 entries across 16 shards |
-| Concurrent accepted peers | 128 |
-| Maximum key / value | 64 KiB / 1 MiB |
-| Input and output frame limit per peer | 1,114,124 bytes each |
-| Connection deadline | 30 seconds since acceptance or last completed response |
-| AOF size limit | 1 GiB |
-| Mutation durability | Append, then `fsync`, before acknowledgement |
-
-Slow partial requests do not reset the connection deadline. Completed responses reset it. Excess peers are closed. Input/output frame limits bound retained application buffers, but allocator overhead and kernel socket buffers add memory usage.
-
-Entry count is not a byte budget. At maximum key/value sizes, 1,000 entries alone can exceed 1 GiB before indexing and network buffers. Set process/container memory and descriptor limits from a measured workload. Changing server capacity, shards, peer count, or AOF limit currently requires constructing `CacheService`/`TcpServer` with different arguments in an embedding application or adjusting the executable defaults and rebuilding.
-
-The event loop executes handlers serially, including disk synchronization. Measure p50/p95/p99 request latency, throughput, queue rejections, and memory under expected value sizes and concurrency. Do not use the historical cache microbenchmarks as network or persistence throughput measurements.
-
-## Containers
-
-Build from the repository root:
+Build with Linux, C++17, CMake, and the Protobuf compiler/development library. The Docker image builds the same CMake targets and runs as UID 10001 with the Protobuf runtime installed.
 
 ```sh
-docker build -f KVCache/Dockerfile -t kvrpc-server:local .
-docker volume create kvrpc-data
-docker run --name kvrpc-server --detach \
-  --publish 127.0.0.1:8080:8080 \
-  --mount source=kvrpc-data,target=/data \
-  --stop-timeout 30 \
-  kvrpc-server:local
+./build/release/kv_server PORT AOF_PATH BIND_ADDRESS group
 ```
 
-The image runs as UID `10001`. Its listener binds all interfaces inside the container; the example publishes only the host loopback interface. A bind-mounted data directory must be writable by UID `10001`. Persist `/data`; the container's writable layer is not a backup.
+The optional sync argument is `group` or `always`. Defaults are 8080, appendonly.aof, 127.0.0.1, and group. Configuration is read once at startup.
 
-```sh
-docker logs kvrpc-server
-docker stop --time 30 kvrpc-server
-```
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| KVRPC_IO_THREADS | 2 | Connection-owning ET threads |
+| KVRPC_CONNECTIONS | 4096 | Simultaneous accepted connections |
+| KVRPC_QUEUE_CAPACITY | 1024 | Waiting storage jobs |
+| KVRPC_QUEUE_BYTES | 67108864 | Waiting request bytes |
+| KVRPC_OUTPUT_BYTES | 8388608 | Per-connection output hard limit |
+| KVRPC_IDLE_MS | 30000 | Connection deadline between completed responses |
+| KVRPC_CACHE_ENTRIES | 1000 | Aggregate entry capacity |
+| KVRPC_CACHE_SHARDS | 16 | LRU capacity partitions |
+| KVRPC_CACHE_BYTES | 67108864 | Aggregate accounted cache bytes |
+| KVRPC_AOF_BYTES | 1073741824 | AOF size limit and rewrite policy input |
 
-The image is defined against the Ubuntu 24.04 tag. For a release pipeline, record the resolved base-image digest and resulting image digest along with the tested source revision.
+Shard byte budgets must fit the largest allowed entry, including metadata. Count/byte limits bound accounted objects, not exact RSS. Set OS fd limits for the intended connection count. Generic embeddings additionally configure business workers and per-connection in-flight limits through `ServerOptions`; the generic example accepts PORT IO_THREADS WORKERS.
+
+Client defaults: four sockets via `ClientEndpoint`, 64 outstanding requests, 64 MiB serialized request bytes, 16 in-flight requests per RPC socket, 2 MiB payload, 2-second connect timeout and 5-second overall request timeout. KV allows one request per socket. Client destruction drains admitted calls; do not submit concurrently with destruction.
+
+KV startup/shutdown output is JSON. `Stats()` returns cache hits/misses, accounted bytes, evictions, AOF records/syncs/bytes/rewrites/sync microseconds, active connections, queue count/bytes, rejections, timeouts, and cumulative handler microseconds/errors. Inspect deltas; counters are process-local. Handler time includes storage waits and can overlap across generic RPC workers.
 
 ## Persistence and recovery
 
-Ready mutations share a synchronization barrier in default `group` mode; `always` synchronizes each mutation separately. No batching timer is added. Each accepted mutation is written to the append-only file and synchronized before the in-memory mutation and response. The parent directory is also synchronized when the log is opened. A second process cannot use the same log concurrently because the writer holds an exclusive advisory lock.
+Use a local filesystem with working fsync, atomic rename, and flock semantics. The AOF and its `.lock` file belong to one server. Rewrite uses a temporary file in the same directory and synchronizes the replacement and directory. A stopped-server backup is the simplest consistent backup procedure; retain both the original file and configuration before upgrading. Do not replace or delete the live `.lock` file.
 
-Acknowledged writes are covered by an abrupt-process-restart integration test. Actual power-loss durability also depends on the filesystem, storage device, and their synchronization guarantees. Reads and LRU ordering are not persisted. A recovered cache can evict different keys or restore previously evicted keys because replay contains mutations rather than read-access history. The source of truth must remain outside the cache; use revisioned keys and explicit invalidation.
+Automatic rewriting snapshots live entries when the log grows near its budget. A rewrite blocks KV command execution on its storage worker, while I/O reactors continue servicing sockets. If live data plus the next batch cannot fit, the batch is rejected; reads remain available. Increase the budget or reduce live data. An actual I/O/fsync error makes storage unavailable: fix the underlying issue before restart.
 
-The log has a 1 GiB default cap. Reaching the cap or encountering a write/sync failure makes the service reject further requests. Resolve the underlying condition and restart. Increasing the limit requires explicit configuration in an embedding application or a rebuilt executable; disk space alone does not override the configured cap. Automatic rotation, snapshots, and compaction are not implemented.
+On checksum/truncation failure, preserve the damaged log and restore a verified backup. This implementation does not automatically truncate crash tails. It tests process death; it does not simulate physical power loss. Replay preserves logged mutations and TTL deadlines, but may reconstruct a different LRU resident set because intervening reads/evictions are not logged.
 
-AOF records have framing validation but no checksums. Framing detects truncation and malformed metadata; arbitrary bit changes in otherwise valid payloads can remain undetected. Maintain verified backups on storage appropriate to the required recovery guarantees.
+SIGINT/SIGTERM wakes the acceptor and drains worker jobs before stopping I/O threads. Responses in flight may be lost. A stalled callback/filesystem operation can extend shutdown; configure the supervisor grace period from the deployment's storage behavior.
 
-### Backups
+## Access and load
 
-1. Stop the server cleanly and verify process exit.
-2. Copy the complete AOF to backup storage and record its checksum externally.
-3. Restart against the original log.
-4. Periodically test the backup by starting an isolated server and checking representative keys.
+The library has no native authentication/TLS endpoint. Bind to loopback or a controlled private interface and use an authenticated transport boundary when remote access is needed. It has no replication, service discovery, or failover.
 
-Copying an actively written AOF can capture a partial final record. The repository does not supply a consistent online-backup API.
-
-### Startup failure
-
-The server exits nonzero for a missing/unwritable parent directory, an incompatible file type, an unavailable log lock, excessive log size, or invalid/truncated records. It does not truncate or repair data automatically.
-
-Preserve the failed file for investigation. Restore a verified backup, or perform a separately reviewed offline recovery that produces a new complete log. Do not append new records to a truncated file or discard the log without an explicit data-loss decision.
-
-### Ambiguous mutation outcomes
-
-A client can time out after the server commits but before its acknowledgement arrives. An unacknowledged mutation may appear after restart. Requests contain no operation IDs or deduplication state. Applications must reconcile ambiguous outcomes instead of assuming a transport exception means the write was rolled back.
-
-## Monitoring and shutdown
-
-Use `KVCacheClient::Stats()` as a protocol-level readiness check. It returns process-local hit/miss and AOF record/sync/byte counters; it does not expose queue depth, disk usage, latency histograms, or per-client traffic. Collect application-side error-code counts and timings, plus operating-system memory, descriptor, and disk metrics.
-
-Startup and request rejection messages go to standard output/error. Request rejection logging is limited to one message per second and omits keys and values. Configure log collection and retention at the process supervisor.
-
-On `SIGINT` or `SIGTERM`, the current synchronous handler finishes and the event loop closes listeners and peers. Pending acknowledgements may be lost; clients must handle disconnects. The loop normally observes stop within its 100 ms poll interval, but a stalled filesystem call can extend shutdown. Set a supervisor grace period from measured worst-case storage behavior.
-
-## Release validation
-
-Before deploying a specific build:
-
-- Pass Release, Debug, and sanitizer tests on the target platform.
-- Verify the installed CMake package in a separate consuming project.
-- Exercise the actual network boundary and persistent volume permissions.
-- Measure latency and memory at expected load, including slow clients and storage pressure.
-- Test backup restoration and process replacement with the selected storage configuration.
-
-CI configuration provides Linux/macOS client builds, Linux server integration, sanitizer jobs, and a container smoke test. A workflow definition is not evidence that those jobs have run for a particular revision; record the actual results when releasing.
+Use the network fixed-arrival-rate probe and persistence benchmark separately. Measure errors, offered/completed load, dropped admissions, P99, CPU, and RSS rather than throughput alone. Increase I/O threads only when measured networking work benefits; serialized KV storage does not become parallel by increasing reactor count.

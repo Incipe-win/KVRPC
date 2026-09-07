@@ -1,63 +1,21 @@
 # Contributing
 
-## Development build
+Linux, a C++17 compiler, CMake, Python 3, and Protobuf compiler/development packages are required. Use the repository .clang-format.
 
 ```sh
-cmake -S . -B build/debug -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-cmake --build build/debug --parallel 4
-ctest --test-dir build/debug --output-on-failure --parallel 4
-```
-
-Point your editor at `build/debug/compile_commands.json`. Generated build files, editor indexes, and AOF files should not be committed.
-
-## Sanitizers
-
-Run AddressSanitizer and UndefinedBehaviorSanitizer together:
-
-```sh
-cmake -S . -B build/asan -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_CXX_COMPILER=clang++ -DKVRPC_SANITIZE=ON
+cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release
+cmake --build build/release --parallel 4
+ctest --test-dir build/release --output-on-failure --parallel 4
+cmake -S . -B build/asan -DCMAKE_BUILD_TYPE=Debug -DKVRPC_SANITIZE=ON -DCMAKE_CXX_COMPILER=clang++
 cmake --build build/asan --parallel 4
 ctest --test-dir build/asan --output-on-failure --parallel 4
-```
-
-Run ThreadSanitizer in a separate build:
-
-```sh
-cmake -S . -B build/tsan -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=clang++ -DKVRPC_TSAN=ON
+cmake -S . -B build/tsan -DCMAKE_BUILD_TYPE=Debug -DKVRPC_TSAN=ON -DCMAKE_CXX_COMPILER=clang++
 cmake --build build/tsan --parallel 4
-ctest --test-dir build/tsan --output-on-failure --parallel 2
+ctest --test-dir build/tsan --output-on-failure --parallel 4
 ```
 
-Sanitizer runtime support depends on the compiler and host kernel. Report startup/runtime incompatibilities separately from test failures; do not suppress race or memory diagnostics to obtain a passing build.
+Run networking tests with local socket permissions. Register callbacks before starting; keep all socket state on its owning EventLoop. Changes to ET budgets must retain explicit continuations. Changes to asynchronous execution must preserve bounded admission, ownership, and request correlation. Changes to storage must preserve fsync-before-ack and crash-safe replacement.
 
-## Test coverage
+Use CMake installation plus tests/install to validate public headers and transitive Protobuf linkage. CI covers release/debug/sanitizers and Docker. Xmake is an alternative; do not claim it was tested unless executed.
 
-| Test | Contract |
-| --- | --- |
-| `serializer` | Byte layout, binary strings, bounds, invalid encodings |
-| `connection_pool` | Exclusive leasing, contention, timeout, shutdown, surviving leases |
-| `rpc_server` | Typed dispatch over real TCP, remote errors, concurrent clients, fragmentation, pipelines |
-| `rpc_client` | Framing, connection reuse, response validation, future lifetime |
-| `kvcache_client` | Acknowledgements, echoed keys, commands, reconnect after invalid responses |
-| `transport` | Partial transfers, deadlines, EOF, reset handling |
-| `executor` | Bounded admission, queue rejection, drain, exception propagation |
-| `storage` | LRU behavior, deletion, log locking, replay, corruption, fail-closed limits |
-| `server_integration` / `server_always` | Both sync modes, profile application, large frames, pipelines, concurrent acknowledged-write recovery, signals |
-
-Assertions remain active in Release builds. Network fixtures bind loopback ports before launching client work and propagate server-side failures back to the test. Tests do not depend on a manually started server.
-
-## Installed package check
-
-```sh
-cmake --install build/release --prefix /tmp/kvrpc-install
-cmake -S tests/install -B build/consumer -DCMAKE_PREFIX_PATH=/tmp/kvrpc-install
-cmake --build build/consumer
-./build/consumer/consumer
-```
-
-## Change requirements
-
-Keep public headers self-contained and maintain the C++17 client baseline. For protocol changes, update the shared definition and protocol reference together, and include compatibility tests using explicit expected bytes. For networking and lifecycle changes, cover the failure path as well as successful requests.
-
-Use the repository's `.clang-format` style when a formatter is available. Keep public documentation in English and describe measured behavior. Performance claims need a reproducible workload, toolchain, hardware specification, and recorded result.
+Keep old benchmark data attributed to its original binary. Generate new files for new versions and report workload, arrival model, errors, and hardware alongside latency/throughput.

@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## Version 2 — Reactor and asynchronous RPC
+
+- Replace runtime poll calls with Linux epoll ET, an acceptor and configurable I/O reactors, eventfd task wakeups, and cancellable deadline timers.
+- Move generic callbacks to bounded workers and KV execution/group commit to a dedicated storage worker.
+- Add a Protobuf RPC v2 envelope with correlation IDs and concurrent in-flight requests; clients use asynchronous socket state machines and whole-call deadlines.
+- Add optional KV lookup, TTL, byte-accounted LRU limits, checksummed AOF records, stable rewrite locking, and atomic live-entry compaction.
+- Expose resource configuration and queue/network/storage counters; add ET, multiplexing, timeout, TTL, checksum, and rewrite regressions and a fixed-arrival-rate network probe.
+- Require Linux and Protobuf. Generic RPC peers must upgrade together; legacy AOF is readable, but new files are not readable by version-1 binaries.
+
+## Version 1 history
 
 ### RPC server and measured group commit
 
