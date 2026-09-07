@@ -1,0 +1,27 @@
+syntax = "proto3";
+package kvrpc.wire;
+message Value {
+  oneof kind {
+    sint64 signed_value = 1;
+    uint64 unsigned_value = 2;
+    double real_value = 3;
+    bool bool_value = 4;
+    bytes string_value = 5;
+    bytes message_value = 6;
+  }
+}
+message Envelope {
+  enum Type { REQUEST = 0; RESPONSE = 1; }
+  Type type = 1;
+  string method = 2;
+  repeated Value arguments = 3;
+  Value result = 4;
+  uint32 status = 5;
+  string error = 6;
+}
+message CacheValue {
+  bool found = 1;
+  bytes value = 2;
+  uint64 expires_unix_ms = 3;
+  uint64 ttl_ms = 4;
+}
